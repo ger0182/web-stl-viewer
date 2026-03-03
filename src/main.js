@@ -3,6 +3,9 @@ import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { STLLoader } from "three/examples/jsm/loaders/STLLoader.js";
 import { OBJLoader } from "three/examples/jsm/loaders/OBJLoader.js";
+import { LineSegments2 } from "three/examples/jsm/lines/LineSegments2.js";
+import { LineSegmentsGeometry } from "three/examples/jsm/lines/LineSegmentsGeometry.js";
+import { LineMaterial } from "three/examples/jsm/lines/LineMaterial.js";
 
 const canvas = document.getElementById("viewerCanvas");
 const fileInput = document.getElementById("fileInput");
@@ -72,11 +75,15 @@ const worldUp = new THREE.Vector3(0, 0, 1);
 const tempDirection = new THREE.Vector3();
 const tempRightAxis = new THREE.Vector3();
 const tempUpAxis = new THREE.Vector3();
+const frontFaceColor = new THREE.Color(0x3b82f6);
+const backFaceColor = new THREE.Color(0xf59e0b);
 
-const sectionLineMaterial = new THREE.LineBasicMaterial({
-  color: 0x111827,
+const sectionLineMaterial = new LineMaterial({
+  color: 0xff2d2d,
+  linewidth: 3,
   transparent: true,
-  opacity: 0.95,
+  opacity: 1,
+  depthTest: true,
 });
 const sectionLineGroup = new THREE.Group();
 sectionLineGroup.visible = false;
@@ -98,6 +105,7 @@ function resizeRenderer() {
   const width = viewerWrap.clientWidth;
   const height = viewerWrap.clientHeight;
   renderer.setSize(width, height, false);
+  sectionLineMaterial.resolution.set(width, height);
   camera.aspect = width / height;
   camera.updateProjectionMatrix();
 }
@@ -172,27 +180,26 @@ function buildDefaultMaterial() {
   });
 }
 
-function buildSegmentedVertexColors(geometry) {
+function buildNormalBasedVertexColors(geometry) {
   const position = geometry.getAttribute("position");
   if (!position || !position.count) {
     return;
   }
 
-  geometry.computeBoundingBox();
-  const minZ = geometry.boundingBox?.min.z ?? 0;
-  const maxZ = geometry.boundingBox?.max.z ?? 1;
-  const range = Math.max(maxZ - minZ, 1e-6);
-  const bandSize = range / 6;
+  let normal = geometry.getAttribute("normal");
+  if (!normal) {
+    geometry.computeVertexNormals();
+    normal = geometry.getAttribute("normal");
+  }
+
+  if (!normal || normal.count !== position.count) {
+    return;
+  }
   const colors = new Float32Array(position.count * 3);
-  const palette = [0x4f46e5, 0x3b82f6, 0x06b6d4, 0x10b981, 0xf59e0b, 0xef4444];
 
   for (let i = 0; i < position.count; i += 1) {
-    const z = position.getZ(i);
-    const bandIndex = Math.min(
-      palette.length - 1,
-      Math.max(0, Math.floor((z - minZ) / Math.max(bandSize, 1e-6))),
-    );
-    const color = new THREE.Color(palette[bandIndex]);
+    const nz = normal.getZ(i);
+    const color = nz >= 0 ? frontFaceColor : backFaceColor;
     colors[i * 3] = color.r;
     colors[i * 3 + 1] = color.g;
     colors[i * 3 + 2] = color.b;
@@ -255,7 +262,7 @@ function updateSectionIntersectionLines() {
     return;
   }
 
-  const segmentPoints = [];
+  const segmentPositions = [];
   const z0 = sectionHeight;
 
   modelItems.forEach((item) => {
@@ -320,19 +327,28 @@ function updateSectionIntersectionLines() {
         });
 
         if (hits.length >= 2) {
-          segmentPoints.push(hits[0], hits[1]);
+          segmentPositions.push(
+            hits[0].x,
+            hits[0].y,
+            hits[0].z + 0.001,
+            hits[1].x,
+            hits[1].y,
+            hits[1].z + 0.001,
+          );
         }
       }
     });
   });
 
-  if (!segmentPoints.length) {
+  if (!segmentPositions.length) {
     sectionLineGroup.visible = false;
     return;
   }
 
-  const lineGeometry = new THREE.BufferGeometry().setFromPoints(segmentPoints);
-  const lines = new THREE.LineSegments(lineGeometry, sectionLineMaterial);
+  const lineGeometry = new LineSegmentsGeometry();
+  lineGeometry.setPositions(segmentPositions);
+  const lines = new LineSegments2(lineGeometry, sectionLineMaterial);
+  lines.computeLineDistances();
   sectionLineGroup.add(lines);
   sectionLineGroup.visible = true;
 }
@@ -511,7 +527,7 @@ function assignModelMetadata(object3D, id) {
   object3D.traverse((child) => {
     child.userData.modelId = id;
     if (child.isMesh && child.geometry && child.material) {
-      buildSegmentedVertexColors(child.geometry);
+      buildNormalBasedVertexColors(child.geometry);
       applySectionPlaneToMesh(child);
       if (Array.isArray(child.material)) {
         child.material.forEach((mat) => {
