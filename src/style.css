@@ -71,6 +71,11 @@ body {
   background: #e5e7eb;
 }
 
+.viewer-wrap.drag-active {
+  outline: 3px dashed #111827;
+  outline-offset: -10px;
+}
+
 #viewerCanvas {
   width: 100%;
   height: 100%;

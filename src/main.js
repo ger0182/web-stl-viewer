@@ -35,6 +35,7 @@ const axis = new THREE.AxesHelper(80);
 scene.add(axis);
 
 let currentModel = null;
+let dragCounter = 0;
 
 function resizeRenderer() {
   const width = viewerWrap.clientWidth;
@@ -144,8 +145,7 @@ async function loadModel(file) {
   throw new Error("目前僅支援 .stl 或 .obj 檔案");
 }
 
-fileInput.addEventListener("change", async (event) => {
-  const selectedFile = event.target.files?.[0];
+async function handleSelectedFile(selectedFile) {
   if (!selectedFile) {
     return;
   }
@@ -163,6 +163,39 @@ fileInput.addEventListener("change", async (event) => {
     console.error(error);
     fileName.textContent = "檔案讀取失敗，請確認格式是否正確";
   }
+}
+
+fileInput.addEventListener("change", async (event) => {
+  const selectedFile = event.target.files?.[0];
+  await handleSelectedFile(selectedFile);
+});
+
+viewerWrap.addEventListener("dragenter", (event) => {
+  event.preventDefault();
+  dragCounter += 1;
+  viewerWrap.classList.add("drag-active");
+});
+
+viewerWrap.addEventListener("dragover", (event) => {
+  event.preventDefault();
+});
+
+viewerWrap.addEventListener("dragleave", (event) => {
+  event.preventDefault();
+  dragCounter -= 1;
+  if (dragCounter <= 0) {
+    dragCounter = 0;
+    viewerWrap.classList.remove("drag-active");
+  }
+});
+
+viewerWrap.addEventListener("drop", async (event) => {
+  event.preventDefault();
+  dragCounter = 0;
+  viewerWrap.classList.remove("drag-active");
+
+  const droppedFile = event.dataTransfer?.files?.[0];
+  await handleSelectedFile(droppedFile);
 });
 
 window.addEventListener("resize", resizeRenderer);
