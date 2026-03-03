@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CAD Viewer (STL / OBJ)</title>
+  </head>
+  <body>
+    <div id="app">
+      <header class="top-bar">
+        <h1>CAD Viewer</h1>
+        <p>上傳並檢視 STL / OBJ 模型</p>
+      </header>
+
+      <section class="controls">
+        <label for="fileInput" class="upload-btn">選擇檔案</label>
+        <input id="fileInput" type="file" accept=".stl,.obj" />
+        <span id="fileName" class="file-name">尚未選擇檔案</span>
+      </section>
+
+      <section class="viewer-wrap">
+        <canvas id="viewerCanvas"></canvas>
+        <div id="hint" class="hint">拖曳旋轉、滾輪縮放、右鍵平移</div>
+      </section>
+    </div>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
