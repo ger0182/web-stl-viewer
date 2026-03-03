@@ -71,6 +71,70 @@ body {
   background: #e5e7eb;
 }
 
+.left-panel,
+.right-panel {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 170px;
+  background: rgba(255, 255, 255, 0.9);
+  border-radius: 10px;
+  padding: 10px;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.left-panel {
+  left: 12px;
+}
+
+.right-panel {
+  right: 12px;
+}
+
+.panel-title {
+  font-weight: 700;
+  font-size: 14px;
+}
+
+.view-toolbar {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 2;
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  max-width: 420px;
+}
+
+.tool-btn {
+  border: 1px solid #d1d5db;
+  background: #ffffff;
+  color: #111827;
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.tool-btn.is-active {
+  background: #111827;
+  color: #ffffff;
+  border-color: #111827;
+}
+
+.model-info {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+  color: #374151;
+}
+
 .viewer-wrap.drag-active {
   outline: 3px dashed #111827;
   outline-offset: -10px;
