@@ -21,6 +21,9 @@ camera.position.set(0, 0, 150);
 
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.domElement.addEventListener("contextmenu", (event) => {
+  event.preventDefault();
+});
 
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
