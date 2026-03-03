@@ -62,12 +62,25 @@ let renderMode = "solid";
 let sectionHeight = 0;
 let isRightDragging = false;
 let rightDragPointerId = null;
+let isSectionSliderDragging = false;
 
 const raycaster = new THREE.Raycaster();
 const pointer = new THREE.Vector2();
 const lastPointer = new THREE.Vector2();
 const sectionPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
 const worldUp = new THREE.Vector3(0, 0, 1);
+const tempDirection = new THREE.Vector3();
+const tempRightAxis = new THREE.Vector3();
+const tempUpAxis = new THREE.Vector3();
+
+const sectionLineMaterial = new THREE.LineBasicMaterial({
+  color: 0x111827,
+  transparent: true,
+  opacity: 0.95,
+});
+const sectionLineGroup = new THREE.Group();
+sectionLineGroup.visible = false;
+scene.add(sectionLineGroup);
 
 const sectionFillMaterial = new THREE.MeshBasicMaterial({
   color: sectionFillColor.value,
@@ -159,6 +172,35 @@ function buildDefaultMaterial() {
   });
 }
 
+function buildSegmentedVertexColors(geometry) {
+  const position = geometry.getAttribute("position");
+  if (!position || !position.count) {
+    return;
+  }
+
+  geometry.computeBoundingBox();
+  const minZ = geometry.boundingBox?.min.z ?? 0;
+  const maxZ = geometry.boundingBox?.max.z ?? 1;
+  const range = Math.max(maxZ - minZ, 1e-6);
+  const bandSize = range / 6;
+  const colors = new Float32Array(position.count * 3);
+  const palette = [0x4f46e5, 0x3b82f6, 0x06b6d4, 0x10b981, 0xf59e0b, 0xef4444];
+
+  for (let i = 0; i < position.count; i += 1) {
+    const z = position.getZ(i);
+    const bandIndex = Math.min(
+      palette.length - 1,
+      Math.max(0, Math.floor((z - minZ) / Math.max(bandSize, 1e-6))),
+    );
+    const color = new THREE.Color(palette[bandIndex]);
+    colors[i * 3] = color.r;
+    colors[i * 3 + 1] = color.g;
+    colors[i * 3 + 2] = color.b;
+  }
+
+  geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+}
+
 function applySectionPlaneToMesh(mesh) {
   if (!mesh.isMesh || !mesh.material) {
     return;
@@ -175,6 +217,124 @@ function applySectionPlaneToMesh(mesh) {
     mesh.material.clipShadows = true;
     mesh.material.needsUpdate = true;
   }
+}
+
+function setSectionClippingEnabled(enabled) {
+  modelItems.forEach((item) => {
+    item.object3D.traverse((child) => {
+      if (!child.isMesh || !child.material) {
+        return;
+      }
+
+      if (Array.isArray(child.material)) {
+        child.material.forEach((mat) => {
+          mat.clippingPlanes = enabled ? [sectionPlane] : [];
+          mat.needsUpdate = true;
+        });
+      } else {
+        child.material.clippingPlanes = enabled ? [sectionPlane] : [];
+        child.material.needsUpdate = true;
+      }
+    });
+  });
+}
+
+function clearSectionLines() {
+  while (sectionLineGroup.children.length > 0) {
+    const child = sectionLineGroup.children[0];
+    sectionLineGroup.remove(child);
+    child.geometry?.dispose();
+  }
+}
+
+function updateSectionIntersectionLines() {
+  clearSectionLines();
+
+  if (!isSectionSliderDragging || sectionHeight <= 0) {
+    sectionLineGroup.visible = false;
+    return;
+  }
+
+  const segmentPoints = [];
+  const z0 = sectionHeight;
+
+  modelItems.forEach((item) => {
+    item.object3D.traverse((child) => {
+      if (!child.isMesh || !child.geometry) {
+        return;
+      }
+
+      const geometry = child.geometry;
+      const position = geometry.getAttribute("position");
+      if (!position) {
+        return;
+      }
+
+      const index = geometry.getIndex();
+      child.updateWorldMatrix(true, false);
+
+      const readIndex = (idx) => (index ? index.getX(idx) : idx);
+      const triCount = index ? index.count / 3 : position.count / 3;
+
+      for (let tri = 0; tri < triCount; tri += 1) {
+        const ia = readIndex(tri * 3);
+        const ib = readIndex(tri * 3 + 1);
+        const ic = readIndex(tri * 3 + 2);
+
+        const a = new THREE.Vector3(position.getX(ia), position.getY(ia), position.getZ(ia)).applyMatrix4(
+          child.matrixWorld,
+        );
+        const b = new THREE.Vector3(position.getX(ib), position.getY(ib), position.getZ(ib)).applyMatrix4(
+          child.matrixWorld,
+        );
+        const c = new THREE.Vector3(position.getX(ic), position.getY(ic), position.getZ(ic)).applyMatrix4(
+          child.matrixWorld,
+        );
+
+        const hits = [];
+        const edges = [
+          [a, b],
+          [b, c],
+          [c, a],
+        ];
+
+        edges.forEach(([p1, p2]) => {
+          const d1 = p1.z - z0;
+          const d2 = p2.z - z0;
+
+          if ((d1 > 0 && d2 > 0) || (d1 < 0 && d2 < 0)) {
+            return;
+          }
+
+          if (Math.abs(d1 - d2) < 1e-8) {
+            return;
+          }
+
+          const t = d1 / (d1 - d2);
+          if (t < 0 || t > 1) {
+            return;
+          }
+
+          const point = new THREE.Vector3().lerpVectors(p1, p2, t);
+          hits.push(point);
+        });
+
+        if (hits.length >= 2) {
+          segmentPoints.push(hits[0], hits[1]);
+        }
+      }
+    });
+  });
+
+  if (!segmentPoints.length) {
+    sectionLineGroup.visible = false;
+    return;
+  }
+
+  const lineGeometry = new THREE.BufferGeometry().setFromPoints(segmentPoints);
+  const lines = new THREE.LineSegments(lineGeometry, sectionLineMaterial);
+  sectionLineGroup.add(lines);
+  sectionLineGroup.visible = true;
 }
 
 async function loadModel(file) {
@@ -238,9 +398,13 @@ function setObjectRenderMode(object3D, mode) {
       if (Array.isArray(child.material)) {
         child.material.forEach((mat) => {
           mat.wireframe = mode === "wire";
+          mat.vertexColors = mode === "solid";
+          mat.color.setHex(mode === "solid" ? 0xffffff : child.userData.baseColor || 0x3b82f6);
         });
       } else {
         child.material.wireframe = mode === "wire";
+        child.material.vertexColors = mode === "solid";
+        child.material.color.setHex(mode === "solid" ? 0xffffff : child.userData.baseColor || 0x3b82f6);
       }
     }
   });
@@ -257,9 +421,12 @@ function getSceneHighestZ() {
 
 function updateSectionPlane(zValue) {
   sectionHeight = Math.max(0, zValue);
+  const enabled = sectionHeight > 0;
   sectionPlane.constant = -sectionHeight;
+  setSectionClippingEnabled(enabled);
   sectionValue.textContent = `Z: ${sectionHeight.toFixed(2)}`;
   updateSectionFillMesh();
+  updateSectionIntersectionLines();
 }
 
 function updateSectionSliderRange() {
@@ -275,7 +442,7 @@ function updateSectionSliderRange() {
 
 function updateSectionFillMesh() {
   const bounds = getSceneBounds();
-  if (!bounds || !sectionFillToggle.checked) {
+  if (!bounds || !sectionFillToggle.checked || sectionHeight <= 0) {
     sectionFillMesh.visible = false;
     return;
   }
@@ -311,9 +478,17 @@ function setActiveModel(modelId) {
 
       const targetColor = item.id === modelId ? 0xf97316 : child.userData.baseColor;
       if (Array.isArray(child.material)) {
-        child.material.forEach((mat) => mat.color.setHex(targetColor));
+        child.material.forEach((mat) => {
+          mat.emissive?.setHex(item.id === modelId ? 0x331100 : 0x000000);
+          if (renderMode === "wire") {
+            mat.color.setHex(targetColor);
+          }
+        });
       } else {
-        child.material.color.setHex(targetColor);
+        child.material.emissive?.setHex(item.id === modelId ? 0x331100 : 0x000000);
+        if (renderMode === "wire") {
+          child.material.color.setHex(targetColor);
+        }
       }
     });
   });
@@ -335,7 +510,8 @@ function assignModelMetadata(object3D, id) {
   object3D.userData.modelId = id;
   object3D.traverse((child) => {
     child.userData.modelId = id;
-    if (child.isMesh && child.material) {
+    if (child.isMesh && child.geometry && child.material) {
+      buildSegmentedVertexColors(child.geometry);
       applySectionPlaneToMesh(child);
       if (Array.isArray(child.material)) {
         child.material.forEach((mat) => {
@@ -369,23 +545,31 @@ function setCameraPreset(viewKey) {
 }
 
 function rotateCameraByRightDrag(deltaX, deltaY) {
+  const yaw = -deltaX * 0.006;
+  const pitch = -deltaY * 0.006;
+
   const target = controls.target.clone();
   const offset = camera.position.clone().sub(target);
-  if (offset.lengthSq() === 0) {
-    return;
+  if (offset.lengthSq() === 0) return;
+
+  const yawQuat = new THREE.Quaternion().setFromAxisAngle(worldUp, yaw);
+  camera.getWorldDirection(tempDirection).normalize();
+  tempRightAxis.crossVectors(tempDirection, worldUp).normalize();
+
+  if (tempRightAxis.lengthSq() < 1e-10) {
+    tempRightAxis.copy(tempUpAxis.set(1, 0, 0));
   }
 
-  const yawAngle = -deltaX * 0.008;
-  const pitchAngle = -deltaY * 0.008;
+  const pitchQuat = new THREE.Quaternion().setFromAxisAngle(tempRightAxis, pitch);
+  const rotation = yawQuat.multiply(pitchQuat);
+  offset.applyQuaternion(rotation);
 
-  offset.applyAxisAngle(worldUp, yawAngle);
-  const rightAxis = new THREE.Vector3().crossVectors(offset, worldUp).normalize();
-  if (rightAxis.lengthSq() > 0) {
-    offset.applyAxisAngle(rightAxis, pitchAngle);
+  camera.position.copy(target).add(offset);
+  camera.up.applyQuaternion(rotation).normalize();
+  if (camera.up.lengthSq() < 1e-8) {
+    camera.up.copy(worldUp);
   }
-
-  camera.position.copy(target.add(offset));
-  camera.lookAt(controls.target);
+  camera.lookAt(target);
   controls.update();
 }
 
@@ -553,6 +737,20 @@ sectionStep.addEventListener("change", () => {
 
 sectionSlider.addEventListener("input", () => {
   updateSectionPlane(Number(sectionSlider.value));
+});
+
+sectionSlider.addEventListener("pointerdown", () => {
+  isSectionSliderDragging = true;
+  updateSectionIntersectionLines();
+});
+
+window.addEventListener("pointerup", () => {
+  if (!isSectionSliderDragging) {
+    return;
+  }
+
+  isSectionSliderDragging = false;
+  updateSectionIntersectionLines();
 });
 
 sectionFillToggle.addEventListener("change", () => {
