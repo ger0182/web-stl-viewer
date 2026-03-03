@@ -65,7 +65,6 @@ let renderMode = "solid";
 let sectionHeight = 0;
 let isRightDragging = false;
 let rightDragPointerId = null;
-let isSectionSliderDragging = false;
 
 const raycaster = new THREE.Raycaster();
 const pointer = new THREE.Vector2();
@@ -75,12 +74,12 @@ const worldUp = new THREE.Vector3(0, 0, 1);
 const tempDirection = new THREE.Vector3();
 const tempRightAxis = new THREE.Vector3();
 const tempUpAxis = new THREE.Vector3();
-const frontFaceColor = new THREE.Color(0x3b82f6);
-const backFaceColor = new THREE.Color(0xf59e0b);
+const exteriorFaceColor = new THREE.Color(0x3b82f6);
+const interiorFaceColor = new THREE.Color(0xf59e0b);
 
 const sectionLineMaterial = new LineMaterial({
   color: 0xff2d2d,
-  linewidth: 3,
+  linewidth: 5,
   transparent: true,
   opacity: 1,
   depthTest: true,
@@ -89,17 +88,22 @@ const sectionLineGroup = new THREE.Group();
 sectionLineGroup.visible = false;
 scene.add(sectionLineGroup);
 
-const sectionFillMaterial = new THREE.MeshBasicMaterial({
+const sectionFrameMaterial = new THREE.LineBasicMaterial({
   color: sectionFillColor.value,
   transparent: true,
-  opacity: 0.35,
-  side: THREE.DoubleSide,
-  depthWrite: false,
+  opacity: 0.95,
 });
-const sectionFillMesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), sectionFillMaterial);
-sectionFillMesh.visible = false;
-sectionFillMesh.renderOrder = 3;
-scene.add(sectionFillMesh);
+const sectionFrameGeometry = new THREE.BufferGeometry().setFromPoints([
+  new THREE.Vector3(-0.5, -0.5, 0),
+  new THREE.Vector3(0.5, -0.5, 0),
+  new THREE.Vector3(0.5, 0.5, 0),
+  new THREE.Vector3(-0.5, 0.5, 0),
+  new THREE.Vector3(-0.5, -0.5, 0),
+]);
+const sectionFrameLine = new THREE.Line(sectionFrameGeometry, sectionFrameMaterial);
+sectionFrameLine.visible = false;
+sectionFrameLine.renderOrder = 3;
+scene.add(sectionFrameLine);
 
 function resizeRenderer() {
   const width = viewerWrap.clientWidth;
@@ -180,32 +184,45 @@ function buildDefaultMaterial() {
   });
 }
 
-function buildNormalBasedVertexColors(geometry) {
-  const position = geometry.getAttribute("position");
-  if (!position || !position.count) {
+function applyExteriorInteriorShader(material) {
+  if (!material || material.userData.exteriorInteriorPatched) {
     return;
   }
 
-  let normal = geometry.getAttribute("normal");
-  if (!normal) {
-    geometry.computeVertexNormals();
-    normal = geometry.getAttribute("normal");
-  }
+  material.userData.exteriorInteriorPatched = true;
+  material.userData.exteriorInteriorEnabled = true;
 
-  if (!normal || normal.count !== position.count) {
-    return;
-  }
-  const colors = new Float32Array(position.count * 3);
+  material.onBeforeCompile = (shader) => {
+    shader.uniforms.exteriorFaceColor = { value: exteriorFaceColor.clone() };
+    shader.uniforms.interiorFaceColor = { value: interiorFaceColor.clone() };
+    shader.uniforms.useExteriorInterior = {
+      value: material.userData.exteriorInteriorEnabled ? 1 : 0,
+    };
 
-  for (let i = 0; i < position.count; i += 1) {
-    const nz = normal.getZ(i);
-    const color = nz >= 0 ? frontFaceColor : backFaceColor;
-    colors[i * 3] = color.r;
-    colors[i * 3 + 1] = color.g;
-    colors[i * 3 + 2] = color.b;
-  }
+    shader.fragmentShader = shader.fragmentShader.replace(
+      "#include <common>",
+      `#include <common>\nuniform vec3 exteriorFaceColor;\nuniform vec3 interiorFaceColor;\nuniform float useExteriorInterior;`,
+    );
 
-  geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+    shader.fragmentShader = shader.fragmentShader.replace(
+      "#include <color_fragment>",
+      `#include <color_fragment>\nif (useExteriorInterior > 0.5) {\n  diffuseColor.rgb = gl_FrontFacing ? exteriorFaceColor : interiorFaceColor;\n}`,
+    );
+
+    material.userData.exteriorInteriorShader = shader;
+  };
+
+  material.customProgramCacheKey = () => "exteriorInterior_v1";
+  material.needsUpdate = true;
+}
+
+function setExteriorInteriorMode(material, enabled) {
+  applyExteriorInteriorShader(material);
+  material.userData.exteriorInteriorEnabled = enabled;
+  const shader = material.userData.exteriorInteriorShader;
+  if (shader?.uniforms?.useExteriorInterior) {
+    shader.uniforms.useExteriorInterior.value = enabled ? 1 : 0;
+  }
 }
 
 function applySectionPlaneToMesh(mesh) {
@@ -257,7 +274,7 @@ function clearSectionLines() {
 function updateSectionIntersectionLines() {
   clearSectionLines();
 
-  if (!isSectionSliderDragging || sectionHeight <= 0) {
+  if (sectionHeight <= 0) {
     sectionLineGroup.visible = false;
     return;
   }
@@ -414,12 +431,14 @@ function setObjectRenderMode(object3D, mode) {
       if (Array.isArray(child.material)) {
         child.material.forEach((mat) => {
           mat.wireframe = mode === "wire";
-          mat.vertexColors = mode === "solid";
+          mat.vertexColors = false;
+          setExteriorInteriorMode(mat, mode === "solid");
           mat.color.setHex(mode === "solid" ? 0xffffff : child.userData.baseColor || 0x3b82f6);
         });
       } else {
         child.material.wireframe = mode === "wire";
-        child.material.vertexColors = mode === "solid";
+        child.material.vertexColors = false;
+        setExteriorInteriorMode(child.material, mode === "solid");
         child.material.color.setHex(mode === "solid" ? 0xffffff : child.userData.baseColor || 0x3b82f6);
       }
     }
@@ -459,7 +478,7 @@ function updateSectionSliderRange() {
 function updateSectionFillMesh() {
   const bounds = getSceneBounds();
   if (!bounds || !sectionFillToggle.checked || sectionHeight <= 0) {
-    sectionFillMesh.visible = false;
+    sectionFrameLine.visible = false;
     return;
   }
 
@@ -467,10 +486,10 @@ function updateSectionFillMesh() {
   const center = bounds.getCenter(new THREE.Vector3());
   const planeSize = Math.max(size.x, size.y, 10) * 1.2;
 
-  sectionFillMesh.visible = true;
-  sectionFillMesh.scale.set(planeSize, planeSize, 1);
-  sectionFillMesh.position.set(center.x, center.y, sectionHeight + 0.001);
-  sectionFillMaterial.color.set(sectionFillColor.value);
+  sectionFrameLine.visible = true;
+  sectionFrameLine.scale.set(planeSize, planeSize, 1);
+  sectionFrameLine.position.set(center.x, center.y, sectionHeight + 0.001);
+  sectionFrameMaterial.color.set(sectionFillColor.value);
 }
 
 function applyRenderMode(mode) {
@@ -527,15 +546,16 @@ function assignModelMetadata(object3D, id) {
   object3D.traverse((child) => {
     child.userData.modelId = id;
     if (child.isMesh && child.geometry && child.material) {
-      buildNormalBasedVertexColors(child.geometry);
       applySectionPlaneToMesh(child);
       if (Array.isArray(child.material)) {
         child.material.forEach((mat) => {
+          applyExteriorInteriorShader(mat);
           if (mat.color) {
             child.userData.baseColor = mat.color.getHex();
           }
         });
       } else if (child.material.color) {
+        applyExteriorInteriorShader(child.material);
         child.userData.baseColor = child.material.color.getHex();
       }
     }
@@ -755,26 +775,12 @@ sectionSlider.addEventListener("input", () => {
   updateSectionPlane(Number(sectionSlider.value));
 });
 
-sectionSlider.addEventListener("pointerdown", () => {
-  isSectionSliderDragging = true;
-  updateSectionIntersectionLines();
-});
-
-window.addEventListener("pointerup", () => {
-  if (!isSectionSliderDragging) {
-    return;
-  }
-
-  isSectionSliderDragging = false;
-  updateSectionIntersectionLines();
-});
-
 sectionFillToggle.addEventListener("change", () => {
   updateSectionFillMesh();
 });
 
 sectionFillColor.addEventListener("input", () => {
-  sectionFillMaterial.color.set(sectionFillColor.value);
+  sectionFrameMaterial.color.set(sectionFillColor.value);
   updateSectionFillMesh();
 });
 
