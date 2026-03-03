@@ -12,6 +12,9 @@ const viewToolbar = document.getElementById("viewToolbar");
 const modelInfo = document.getElementById("modelInfo");
 const renderSolidBtn = document.getElementById("renderSolid");
 const renderWireBtn = document.getElementById("renderWire");
+const sectionSlider = document.getElementById("sectionSlider");
+const sectionStep = document.getElementById("sectionStep");
+const sectionValue = document.getElementById("sectionValue");
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0xe5e7eb);
@@ -24,10 +27,10 @@ renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.domElement.addEventListener("contextmenu", (event) => {
   event.preventDefault();
 });
+renderer.localClippingEnabled = true;
 
 const controls = new OrbitControls(camera, renderer.domElement);
-controls.enableDamping = true;
-controls.dampingFactor = 0.08;
+controls.enableDamping = false;
 controls.mouseButtons = {
   LEFT: null,
   MIDDLE: THREE.MOUSE.PAN,
@@ -40,7 +43,8 @@ dirLight.position.set(80, 100, 120);
 scene.add(dirLight);
 
 const grid = new THREE.GridHelper(300, 20, 0x9ca3af, 0xd1d5db);
-grid.position.y = -50;
+grid.rotation.x = Math.PI / 2;
+grid.position.z = 0;
 scene.add(grid);
 
 const axis = new THREE.AxesHelper(80);
@@ -50,9 +54,11 @@ const modelItems = [];
 let activeModelId = null;
 let dragCounter = 0;
 let renderMode = "solid";
+let sectionHeight = 0;
 
 const raycaster = new THREE.Raycaster();
 const pointer = new THREE.Vector2();
+const sectionPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
 
 function resizeRenderer() {
   const width = viewerWrap.clientWidth;
@@ -159,7 +165,26 @@ function buildDefaultMaterial() {
     metalness: 0.1,
     roughness: 0.55,
     side: THREE.DoubleSide,
+    clippingPlanes: [sectionPlane],
   });
+}
+
+function applySectionPlaneToMesh(mesh) {
+  if (!mesh.isMesh || !mesh.material) {
+    return;
+  }
+
+  if (Array.isArray(mesh.material)) {
+    mesh.material.forEach((mat) => {
+      mat.clippingPlanes = [sectionPlane];
+      mat.clipShadows = true;
+      mat.needsUpdate = true;
+    });
+  } else {
+    mesh.material.clippingPlanes = [sectionPlane];
+    mesh.material.clipShadows = true;
+    mesh.material.needsUpdate = true;
+  }
 }
 
 async function loadModel(file) {
@@ -219,6 +244,7 @@ function countModelStats(object3D) {
 function setObjectRenderMode(object3D, mode) {
   object3D.traverse((child) => {
     if (child.isMesh && child.material) {
+      applySectionPlaneToMesh(child);
       if (Array.isArray(child.material)) {
         child.material.forEach((mat) => {
           mat.wireframe = mode === "wire";
@@ -228,6 +254,37 @@ function setObjectRenderMode(object3D, mode) {
       }
     }
   });
+}
+
+function getSceneHighestZ() {
+  if (!modelItems.length) {
+    return 0;
+  }
+
+  let highest = 0;
+  modelItems.forEach((item) => {
+    const box = new THREE.Box3().setFromObject(item.object3D);
+    highest = Math.max(highest, box.max.z);
+  });
+
+  return Number(highest.toFixed(3));
+}
+
+function updateSectionPlane(zValue) {
+  sectionHeight = Math.max(0, zValue);
+  sectionPlane.constant = -sectionHeight;
+  sectionValue.textContent = `Z: ${sectionHeight.toFixed(2)}`;
+}
+
+function updateSectionSliderRange() {
+  const maxZ = getSceneHighestZ();
+  sectionSlider.max = `${maxZ}`;
+  if (Number(sectionSlider.value) > maxZ) {
+    sectionSlider.value = `${maxZ}`;
+  }
+
+  const nextZ = Number(sectionSlider.value || 0);
+  updateSectionPlane(nextZ);
 }
 
 function applyRenderMode(mode) {
@@ -276,6 +333,7 @@ function assignModelMetadata(object3D, id) {
   object3D.traverse((child) => {
     child.userData.modelId = id;
     if (child.isMesh && child.material) {
+      applySectionPlaneToMesh(child);
       if (Array.isArray(child.material)) {
         child.material.forEach((mat) => {
           if (mat.color) {
@@ -330,6 +388,7 @@ async function handleSelectedFile(selectedFile) {
 
     modelItems.push(modelItem);
     scene.add(model);
+    updateSectionSliderRange();
     fitCameraToAllModels();
     setActiveModel(id);
     fileName.textContent = `已載入：${selectedFile.name}`;
@@ -423,12 +482,23 @@ renderWireBtn.addEventListener("click", () => {
   applyRenderMode("wire");
 });
 
+sectionStep.addEventListener("change", () => {
+  const parsedStep = Number(sectionStep.value);
+  const validStep = Number.isFinite(parsedStep) && parsedStep > 0 ? parsedStep : 1;
+  sectionStep.value = `${validStep}`;
+  sectionSlider.step = `${validStep}`;
+});
+
+sectionSlider.addEventListener("input", () => {
+  updateSectionPlane(Number(sectionSlider.value));
+});
+
 window.addEventListener("resize", resizeRenderer);
 resizeRenderer();
+updateSectionPlane(0);
 
 function animate() {
   requestAnimationFrame(animate);
-  controls.update();
   renderer.render(scene, camera);
 }
 

@@ -135,6 +135,44 @@ body {
   color: #374151;
 }
 
+.section-control {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid #e5e7eb;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+  color: #374151;
+}
+
+#sectionStep {
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  padding: 4px 6px;
+  width: 100%;
+}
+
+.section-slider-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding-top: 4px;
+}
+
+.section-value {
+  font-weight: 600;
+  color: #111827;
+}
+
+.section-slider {
+  -webkit-appearance: slider-vertical;
+  appearance: auto;
+  width: 22px;
+  height: 170px;
+}
+
 .viewer-wrap.drag-active {
   outline: 3px dashed #111827;
   outline-offset: -10px;

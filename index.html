@@ -44,11 +44,34 @@
             <div>點數：-</div>
             <div>網格數：-</div>
           </div>
+          <div class="section-control">
+            <label for="sectionStep">剖面 Step</label>
+            <input
+              id="sectionStep"
+              type="number"
+              min="0.1"
+              step="0.1"
+              value="1"
+            />
+            <div class="section-slider-wrap">
+              <div id="sectionValue" class="section-value">Z: 0</div>
+              <input
+                id="sectionSlider"
+                class="section-slider"
+                type="range"
+                min="0"
+                max="0"
+                step="1"
+                value="0"
+              />
+            </div>
+          </div>
         </aside>
 
         <canvas id="viewerCanvas"></canvas>
         <div id="hint" class="hint">
-          可拖拉 STL/OBJ 到此上傳｜右鍵旋轉、中鍵平移、滾輪縮放、左鍵選取
+          可拖拉 STL/OBJ 到此上傳｜右鍵旋轉、中鍵平移、滾輪縮放、左鍵選取｜Z
+          剖面
         </div>
       </section>
     </div>
