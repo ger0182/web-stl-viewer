@@ -19,59 +19,116 @@
       </section>
 
       <section class="viewer-wrap">
-        <aside class="left-panel">
-          <div class="panel-title">顯示模式</div>
-          <button id="renderSolid" class="tool-btn is-active" type="button">
-            網格面
-          </button>
-          <button id="renderWire" class="tool-btn" type="button">網格線</button>
-        </aside>
-
-        <div class="view-toolbar" id="viewToolbar">
-          <button class="tool-btn" type="button" data-view="iso">ISO</button>
-          <button class="tool-btn" type="button" data-view="front">前</button>
-          <button class="tool-btn" type="button" data-view="back">後</button>
-          <button class="tool-btn" type="button" data-view="left">左</button>
-          <button class="tool-btn" type="button" data-view="right">右</button>
-          <button class="tool-btn" type="button" data-view="top">上</button>
-          <button class="tool-btn" type="button" data-view="bottom">下</button>
+        <div class="top-right-tools">
+          <div class="icon-toolbar" id="viewToolbar" aria-label="視角切換">
+            <button class="icon-btn" type="button" data-view="iso" title="ISO">
+              ◇
+            </button>
+            <button
+              class="icon-btn"
+              type="button"
+              data-view="front"
+              title="前視"
+            >
+              ↑
+            </button>
+            <button
+              class="icon-btn"
+              type="button"
+              data-view="back"
+              title="後視"
+            >
+              ↓
+            </button>
+            <button
+              class="icon-btn"
+              type="button"
+              data-view="left"
+              title="左視"
+            >
+              ←
+            </button>
+            <button
+              class="icon-btn"
+              type="button"
+              data-view="right"
+              title="右視"
+            >
+              →
+            </button>
+            <button class="icon-btn" type="button" data-view="top" title="上視">
+              ⤒
+            </button>
+            <button
+              class="icon-btn"
+              type="button"
+              data-view="bottom"
+              title="下視"
+            >
+              ⤓
+            </button>
+          </div>
+          <div class="icon-toolbar" aria-label="顯示模式">
+            <button
+              id="renderSolid"
+              class="icon-btn is-active"
+              type="button"
+              title="網格面"
+            >
+              ◼
+            </button>
+            <button
+              id="renderWire"
+              class="icon-btn"
+              type="button"
+              title="網格線"
+            >
+              #
+            </button>
+          </div>
         </div>
 
-        <aside class="right-panel">
+        <aside class="section-panel">
+          <div class="panel-title">剖面</div>
+          <label for="sectionStep">Step</label>
+          <input
+            id="sectionStep"
+            type="number"
+            min="0.1"
+            step="0.1"
+            value="1"
+          />
+          <label class="fill-toggle" for="sectionFillToggle">
+            <input id="sectionFillToggle" type="checkbox" checked />
+            顯示剖面填色
+          </label>
+          <input id="sectionFillColor" type="color" value="#f97316" />
+          <div id="sectionValue" class="section-value">Z: 0</div>
+          <div class="section-slider-wrap">
+            <input
+              id="sectionSlider"
+              class="section-slider"
+              type="range"
+              min="0"
+              max="0"
+              step="1"
+              value="0"
+            />
+          </div>
+        </aside>
+
+        <aside class="info-card">
           <div class="panel-title">模型資訊</div>
           <div id="modelInfo" class="model-info">
             <div>檔案：未選取</div>
             <div>點數：-</div>
             <div>網格數：-</div>
           </div>
-          <div class="section-control">
-            <label for="sectionStep">剖面 Step</label>
-            <input
-              id="sectionStep"
-              type="number"
-              min="0.1"
-              step="0.1"
-              value="1"
-            />
-            <div class="section-slider-wrap">
-              <div id="sectionValue" class="section-value">Z: 0</div>
-              <input
-                id="sectionSlider"
-                class="section-slider"
-                type="range"
-                min="0"
-                max="0"
-                step="1"
-                value="0"
-              />
-            </div>
-          </div>
         </aside>
 
         <canvas id="viewerCanvas"></canvas>
         <div id="hint" class="hint">
-          可拖拉 STL/OBJ 到此上傳｜右鍵旋轉、中鍵平移、滾輪縮放、左鍵選取｜Z
-          剖面
+          可拖拉 STL/OBJ 到此上傳｜右鍵旋轉、中鍵平移、滾輪縮放、左鍵選取
         </div>
       </section>
     </div>

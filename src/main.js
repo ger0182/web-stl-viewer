@@ -15,11 +15,14 @@ const renderWireBtn = document.getElementById("renderWire");
 const sectionSlider = document.getElementById("sectionSlider");
 const sectionStep = document.getElementById("sectionStep");
 const sectionValue = document.getElementById("sectionValue");
+const sectionFillToggle = document.getElementById("sectionFillToggle");
+const sectionFillColor = document.getElementById("sectionFillColor");
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0xe5e7eb);
 
 const camera = new THREE.PerspectiveCamera(55, 1, 0.1, 5000);
+camera.up.set(0, 0, 1);
 camera.position.set(0, 0, 150);
 
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
@@ -31,10 +34,12 @@ renderer.localClippingEnabled = true;
 
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = false;
+controls.enableRotate = false;
+controls.screenSpacePanning = true;
 controls.mouseButtons = {
   LEFT: null,
   MIDDLE: THREE.MOUSE.PAN,
-  RIGHT: THREE.MOUSE.ROTATE,
+  RIGHT: null,
 };
 
 scene.add(new THREE.AmbientLight(0xffffff, 1.2));
@@ -55,10 +60,26 @@ let activeModelId = null;
 let dragCounter = 0;
 let renderMode = "solid";
 let sectionHeight = 0;
+let isRightDragging = false;
+let rightDragPointerId = null;
 
 const raycaster = new THREE.Raycaster();
 const pointer = new THREE.Vector2();
+const lastPointer = new THREE.Vector2();
 const sectionPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
+const worldUp = new THREE.Vector3(0, 0, 1);
+
+const sectionFillMaterial = new THREE.MeshBasicMaterial({
+  color: sectionFillColor.value,
+  transparent: true,
+  opacity: 0.35,
+  side: THREE.DoubleSide,
+  depthWrite: false,
+});
+const sectionFillMesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), sectionFillMaterial);
+sectionFillMesh.visible = false;
+sectionFillMesh.renderOrder = 3;
+scene.add(sectionFillMesh);
 
 function resizeRenderer() {
   const width = viewerWrap.clientWidth;
@@ -68,60 +89,15 @@ function resizeRenderer() {
   camera.updateProjectionMatrix();
 }
 
-function clearAllModels() {
-  if (!modelItems.length) {
-    return;
-  }
-
-  modelItems.forEach((item) => {
-    scene.remove(item.object3D);
-    item.object3D.traverse((child) => {
-      if (child.isMesh) {
-        child.geometry?.dispose();
-        if (Array.isArray(child.material)) {
-          child.material.forEach((mat) => mat.dispose());
-        } else {
-          child.material?.dispose();
-        }
-      }
-    });
-  });
-
-  modelItems.length = 0;
-  activeModelId = null;
-  updateModelInfoPanel(null);
-}
-
-function fitCameraToObject(object3D) {
-  const box = new THREE.Box3().setFromObject(object3D);
-  const size = box.getSize(new THREE.Vector3());
-  const center = box.getCenter(new THREE.Vector3());
-
-  const maxDim = Math.max(size.x, size.y, size.z);
-  const fov = (camera.fov * Math.PI) / 180;
-  const distance = maxDim / (2 * Math.tan(fov / 2));
-
-  camera.position.copy(center);
-  camera.position.x += distance * 1.5;
-  camera.position.y += distance * 1.2;
-  camera.position.z += distance * 1.5;
-  camera.near = Math.max(distance / 100, 0.01);
-  camera.far = Math.max(distance * 100, 1000);
-  camera.updateProjectionMatrix();
-
-  controls.target.copy(center);
-  controls.update();
-}
-
 function fitCameraToAllModels() {
   if (!modelItems.length) {
     return;
   }
 
-  const merged = new THREE.Box3();
-  modelItems.forEach((item) => {
-    merged.union(new THREE.Box3().setFromObject(item.object3D));
-  });
+  const merged = getSceneBounds();
+  if (!merged) {
+    return;
+  }
 
   const size = merged.getSize(new THREE.Vector3());
   const center = merged.getCenter(new THREE.Vector3());
@@ -138,7 +114,21 @@ function fitCameraToAllModels() {
   camera.updateProjectionMatrix();
 
   controls.target.copy(center);
+  camera.lookAt(center);
   controls.update();
+}
+
+function getSceneBounds() {
+  if (!modelItems.length) {
+    return null;
+  }
+
+  const merged = new THREE.Box3();
+  modelItems.forEach((item) => {
+    merged.union(new THREE.Box3().setFromObject(item.object3D));
+  });
+
+  return merged;
 }
 
 function readFileAsArrayBuffer(file) {
@@ -257,23 +247,19 @@ function setObjectRenderMode(object3D, mode) {
 }
 
 function getSceneHighestZ() {
-  if (!modelItems.length) {
+  const bounds = getSceneBounds();
+  if (!bounds) {
     return 0;
   }
 
-  let highest = 0;
-  modelItems.forEach((item) => {
-    const box = new THREE.Box3().setFromObject(item.object3D);
-    highest = Math.max(highest, box.max.z);
-  });
-
-  return Number(highest.toFixed(3));
+  return Number(Math.max(0, bounds.max.z).toFixed(3));
 }
 
 function updateSectionPlane(zValue) {
   sectionHeight = Math.max(0, zValue);
   sectionPlane.constant = -sectionHeight;
   sectionValue.textContent = `Z: ${sectionHeight.toFixed(2)}`;
+  updateSectionFillMesh();
 }
 
 function updateSectionSliderRange() {
@@ -285,6 +271,23 @@ function updateSectionSliderRange() {
 
   const nextZ = Number(sectionSlider.value || 0);
   updateSectionPlane(nextZ);
+}
+
+function updateSectionFillMesh() {
+  const bounds = getSceneBounds();
+  if (!bounds || !sectionFillToggle.checked) {
+    sectionFillMesh.visible = false;
+    return;
+  }
+
+  const size = bounds.getSize(new THREE.Vector3());
+  const center = bounds.getCenter(new THREE.Vector3());
+  const planeSize = Math.max(size.x, size.y, 10) * 1.2;
+
+  sectionFillMesh.visible = true;
+  sectionFillMesh.scale.set(planeSize, planeSize, 1);
+  sectionFillMesh.position.set(center.x, center.y, sectionHeight + 0.001);
+  sectionFillMaterial.color.set(sectionFillColor.value);
 }
 
 function applyRenderMode(mode) {
@@ -349,19 +352,67 @@ function assignModelMetadata(object3D, id) {
 
 function setCameraPreset(viewKey) {
   const target = controls.target.clone();
-  let direction = new THREE.Vector3(1, 1, 1);
+  let direction = new THREE.Vector3(1, -1, 1);
 
-  if (viewKey === "front") direction = new THREE.Vector3(0, 0, 1);
-  if (viewKey === "back") direction = new THREE.Vector3(0, 0, -1);
+  if (viewKey === "front") direction = new THREE.Vector3(0, -1, 0);
+  if (viewKey === "back") direction = new THREE.Vector3(0, 1, 0);
   if (viewKey === "left") direction = new THREE.Vector3(-1, 0, 0);
   if (viewKey === "right") direction = new THREE.Vector3(1, 0, 0);
-  if (viewKey === "top") direction = new THREE.Vector3(0, 1, 0);
-  if (viewKey === "bottom") direction = new THREE.Vector3(0, -1, 0);
+  if (viewKey === "top") direction = new THREE.Vector3(0, 0, 1);
+  if (viewKey === "bottom") direction = new THREE.Vector3(0, 0, -1);
 
   const distance = camera.position.distanceTo(target);
   camera.position.copy(target.clone().add(direction.normalize().multiplyScalar(distance)));
+  camera.lookAt(target);
   camera.updateProjectionMatrix();
   controls.update();
+}
+
+function rotateCameraByRightDrag(deltaX, deltaY) {
+  const target = controls.target.clone();
+  const offset = camera.position.clone().sub(target);
+  if (offset.lengthSq() === 0) {
+    return;
+  }
+
+  const yawAngle = -deltaX * 0.008;
+  const pitchAngle = -deltaY * 0.008;
+
+  offset.applyAxisAngle(worldUp, yawAngle);
+  const rightAxis = new THREE.Vector3().crossVectors(offset, worldUp).normalize();
+  if (rightAxis.lengthSq() > 0) {
+    offset.applyAxisAngle(rightAxis, pitchAngle);
+  }
+
+  camera.position.copy(target.add(offset));
+  camera.lookAt(controls.target);
+  controls.update();
+}
+
+function selectModelByPointer(event) {
+  const rect = renderer.domElement.getBoundingClientRect();
+  pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+  pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+
+  raycaster.setFromCamera(pointer, camera);
+  const meshes = [];
+  modelItems.forEach((item) => {
+    item.object3D.traverse((child) => {
+      if (child.isMesh) {
+        meshes.push(child);
+      }
+    });
+  });
+
+  const intersects = raycaster.intersectObjects(meshes, false);
+  if (!intersects.length) {
+    return;
+  }
+
+  const modelId = intersects[0].object.userData.modelId;
+  if (modelId) {
+    setActiveModel(modelId);
+  }
 }
 
 async function handleSelectedFile(selectedFile) {
@@ -435,34 +486,45 @@ viewerWrap.addEventListener("drop", async (event) => {
   }
 });
 
-viewerWrap.addEventListener("pointerdown", (event) => {
-  if (event.button !== 0) {
+renderer.domElement.addEventListener("pointerdown", (event) => {
+  if (event.button === 2) {
+    isRightDragging = true;
+    rightDragPointerId = event.pointerId;
+    lastPointer.set(event.clientX, event.clientY);
+    renderer.domElement.setPointerCapture(event.pointerId);
     return;
   }
 
-  const rect = renderer.domElement.getBoundingClientRect();
-  pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
-  pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+  if (event.button === 0) {
+    selectModelByPointer(event);
+  }
+});
 
-  raycaster.setFromCamera(pointer, camera);
-  const meshes = [];
-  modelItems.forEach((item) => {
-    item.object3D.traverse((child) => {
-      if (child.isMesh) {
-        meshes.push(child);
-      }
-    });
-  });
-
-  const intersects = raycaster.intersectObjects(meshes, false);
-  if (!intersects.length) {
+renderer.domElement.addEventListener("pointermove", (event) => {
+  if (!isRightDragging || event.pointerId !== rightDragPointerId) {
     return;
   }
 
-  const modelId = intersects[0].object.userData.modelId;
-  if (modelId) {
-    setActiveModel(modelId);
+  const deltaX = event.clientX - lastPointer.x;
+  const deltaY = event.clientY - lastPointer.y;
+  lastPointer.set(event.clientX, event.clientY);
+
+  rotateCameraByRightDrag(deltaX, deltaY);
+});
+
+renderer.domElement.addEventListener("pointerup", (event) => {
+  if (!isRightDragging || event.pointerId !== rightDragPointerId) {
+    return;
   }
+
+  isRightDragging = false;
+  rightDragPointerId = null;
+  renderer.domElement.releasePointerCapture(event.pointerId);
+});
+
+renderer.domElement.addEventListener("pointercancel", () => {
+  isRightDragging = false;
+  rightDragPointerId = null;
 });
 
 viewToolbar.addEventListener("click", (event) => {
@@ -493,12 +555,23 @@ sectionSlider.addEventListener("input", () => {
   updateSectionPlane(Number(sectionSlider.value));
 });
 
+sectionFillToggle.addEventListener("change", () => {
+  updateSectionFillMesh();
+});
+
+sectionFillColor.addEventListener("input", () => {
+  sectionFillMaterial.color.set(sectionFillColor.value);
+  updateSectionFillMesh();
+});
+
 window.addEventListener("resize", resizeRenderer);
 resizeRenderer();
 updateSectionPlane(0);
+sectionSlider.step = sectionStep.value;
 
 function animate() {
   requestAnimationFrame(animate);
+  controls.update();
   renderer.render(scene, camera);
 }
 
