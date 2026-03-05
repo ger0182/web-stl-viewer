@@ -185,6 +185,23 @@ body {
   background: #ffffff;
 }
 
+.sensitivity-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+#boundarySensitivity {
+  width: 100%;
+}
+
+#boundarySensitivityValue {
+  min-width: 28px;
+  text-align: right;
+  font-size: 12px;
+  color: #374151;
+}
+
 .section-slider-wrap {
   display: flex;
   flex: 1;

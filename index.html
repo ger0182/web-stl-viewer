@@ -111,6 +111,18 @@
             顯示剖面框線
           </label>
           <input id="sectionFillColor" type="color" value="#f97316" />
+          <label for="boundarySensitivity">交界靈敏度</label>
+          <div class="sensitivity-row">
+            <input
+              id="boundarySensitivity"
+              type="range"
+              min="1"
+              max="100"
+              step="1"
+              value="60"
+            />
+            <span id="boundarySensitivityValue">60</span>
+          </div>
           <div id="sectionValue" class="section-value">Z: 0</div>
           <div class="section-slider-wrap">
             <input

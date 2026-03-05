@@ -21,6 +21,8 @@ const sectionStep = document.getElementById("sectionStep");
 const sectionValue = document.getElementById("sectionValue");
 const sectionFillToggle = document.getElementById("sectionFillToggle");
 const sectionFillColor = document.getElementById("sectionFillColor");
+const boundarySensitivity = document.getElementById("boundarySensitivity");
+const boundarySensitivityValue = document.getElementById("boundarySensitivityValue");
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0xe5e7eb);
@@ -90,10 +92,10 @@ sectionLineGroup.visible = false;
 scene.add(sectionLineGroup);
 
 const boundaryLineMaterial = new LineMaterial({
-  color: 0x00a63f,
-  linewidth: 4,
+  color: 0xff0033,
+  linewidth: 6,
   transparent: true,
-  opacity: 0.95,
+  opacity: 1,
   depthTest: true,
 });
 const boundaryLineGroup = new THREE.Group();
@@ -565,6 +567,8 @@ function detectBoundaryForActiveModel() {
   }
 
   const segmentPositions = [];
+  const sensitivityValue = Number(boundarySensitivity.value || 60);
+  const sensitivityNorm = Math.max(0, Math.min(1, sensitivityValue / 100));
 
   targetItem.object3D.traverse((child) => {
     if (!child.isMesh || !child.geometry) {
@@ -705,6 +709,7 @@ function detectBoundaryForActiveModel() {
       c0 = Math.min(c0, feature[i]);
       c1 = Math.max(c1, feature[i]);
     }
+    const featureRange = Math.max(c1 - c0, 1e-8);
 
     const labels = new Uint8Array(weldedCount);
     const values = Array.from(feature);
@@ -748,8 +753,16 @@ function detectBoundaryForActiveModel() {
     }
 
     child.updateWorldMatrix(true, false);
+    const boundaryThreshold = (1 - sensitivityNorm) * featureRange * 0.35;
+    let localSegments = 0;
+
     edges.forEach(([a, b]) => {
       if (labels[a] === labels[b]) {
+        return;
+      }
+
+      const deltaFeature = Math.abs(feature[a] - feature[b]);
+      if (deltaFeature < boundaryThreshold) {
         return;
       }
 
@@ -760,7 +773,22 @@ function detectBoundaryForActiveModel() {
       const pb = vb.clone().applyMatrix4(child.matrixWorld);
 
       segmentPositions.push(pa.x, pa.y, pa.z, pb.x, pb.y, pb.z);
+      localSegments += 1;
     });
+
+    if (!localSegments) {
+      edges.forEach(([a, b]) => {
+        if (labels[a] === labels[b]) {
+          return;
+        }
+
+        const va = weldedPositions[a];
+        const vb = weldedPositions[b];
+        const pa = va.clone().applyMatrix4(child.matrixWorld);
+        const pb = vb.clone().applyMatrix4(child.matrixWorld);
+        segmentPositions.push(pa.x, pa.y, pa.z, pb.x, pb.y, pb.z);
+      });
+    }
   });
 
   if (!segmentPositions.length) {
@@ -1014,6 +1042,10 @@ detectBoundaryBtn.addEventListener("click", () => {
   detectBoundaryForActiveModel();
 });
 
+boundarySensitivity.addEventListener("input", () => {
+  boundarySensitivityValue.textContent = boundarySensitivity.value;
+});
+
 sectionStep.addEventListener("change", () => {
   const parsedStep = Number(sectionStep.value);
   const validStep = Number.isFinite(parsedStep) && parsedStep > 0 ? parsedStep : 1;
@@ -1038,6 +1070,7 @@ window.addEventListener("resize", resizeRenderer);
 resizeRenderer();
 updateSectionPlane(0);
 sectionSlider.step = sectionStep.value;
+boundarySensitivityValue.textContent = boundarySensitivity.value;
 
 function animate() {
   requestAnimationFrame(animate);
