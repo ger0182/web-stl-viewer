@@ -607,6 +607,14 @@ function detectBoundaryForActiveModel() {
       return;
     }
 
+    let localMin = new THREE.Vector3(Infinity, Infinity, Infinity);
+    let localMax = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
+    for (let i = 0; i < weldedCount; i += 1) {
+      localMin.min(weldedPositions[i]);
+      localMax.max(weldedPositions[i]);
+    }
+    const localDiagonal = localMax.distanceTo(localMin);
+
     const neighbors = Array.from({ length: weldedCount }, () => new Set());
     const edges = [];
     const edgeSet = new Set();
@@ -754,7 +762,7 @@ function detectBoundaryForActiveModel() {
 
     child.updateWorldMatrix(true, false);
     const boundaryThreshold = (1 - sensitivityNorm) * featureRange * 0.35;
-    let localSegments = 0;
+    const labeledBoundaryEdges = [];
 
     edges.forEach(([a, b]) => {
       if (labels[a] === labels[b]) {
@@ -766,6 +774,87 @@ function detectBoundaryForActiveModel() {
         return;
       }
 
+      labeledBoundaryEdges.push({ a, b, deltaFeature });
+    });
+
+    // Fallback to non-threshold boundary edges if threshold is too strict.
+    const rawBoundaryEdges = labeledBoundaryEdges.length
+      ? labeledBoundaryEdges
+      : edges
+          .filter(([a, b]) => labels[a] !== labels[b])
+          .map(([a, b]) => ({ a, b, deltaFeature: Math.abs(feature[a] - feature[b]) }));
+
+    if (!rawBoundaryEdges.length) {
+      return;
+    }
+
+    const minEdgeLength = Math.max(1e-6, localDiagonal * 0.004 * (1.1 - sensitivityNorm * 0.4));
+    const lengthFiltered = rawBoundaryEdges.filter(({ a, b }) => {
+      return weldedPositions[a].distanceTo(weldedPositions[b]) >= minEdgeLength;
+    });
+
+    // If length filter over-prunes on very dense meshes, fallback once.
+    const edgesAfterLength = lengthFiltered.length ? lengthFiltered : rawBoundaryEdges;
+
+    const vertexToEdge = Array.from({ length: weldedCount }, () => []);
+    edgesAfterLength.forEach((edge, idx) => {
+      vertexToEdge[edge.a].push(idx);
+      vertexToEdge[edge.b].push(idx);
+    });
+
+    const visited = new Uint8Array(edgesAfterLength.length);
+    const components = [];
+
+    for (let i = 0; i < edgesAfterLength.length; i += 1) {
+      if (visited[i]) {
+        continue;
+      }
+
+      const stack = [i];
+      visited[i] = 1;
+      const comp = [];
+
+      while (stack.length) {
+        const eIdx = stack.pop();
+        comp.push(eIdx);
+        const edge = edgesAfterLength[eIdx];
+        const incident = [...vertexToEdge[edge.a], ...vertexToEdge[edge.b]];
+        incident.forEach((nIdx) => {
+          if (!visited[nIdx]) {
+            visited[nIdx] = 1;
+            stack.push(nIdx);
+          }
+        });
+      }
+
+      components.push(comp);
+    }
+
+    const minComponentEdges = Math.max(5, Math.floor(edgesAfterLength.length * 0.02));
+    const largeComponents = components.filter((comp) => comp.length >= minComponentEdges);
+    const componentFiltered = (largeComponents.length ? largeComponents : components).flatMap((comp) =>
+      comp.map((idx) => edgesAfterLength[idx]),
+    );
+
+    // Curvature-consistency filter: suppress sparse noisy spikes inside each component.
+    const groupedForConsistency = [];
+    const compSource = largeComponents.length ? largeComponents : components;
+    compSource.forEach((comp) => {
+      const compEdges = comp.map((idx) => edgesAfterLength[idx]);
+      const mean = compEdges.reduce((acc, e) => acc + e.deltaFeature, 0) / compEdges.length;
+      const variance =
+        compEdges.reduce((acc, e) => acc + (e.deltaFeature - mean) * (e.deltaFeature - mean), 0) /
+        compEdges.length;
+      const std = Math.sqrt(Math.max(variance, 0));
+      const lowerBound = Math.max(0, mean - std * 0.75);
+      const stable = compEdges.filter((e) => e.deltaFeature >= lowerBound);
+      groupedForConsistency.push(...(stable.length ? stable : compEdges));
+    });
+
+    const finalEdges = groupedForConsistency.length ? groupedForConsistency : componentFiltered;
+
+    finalEdges.forEach(({ a, b }) => {
+
       const va = weldedPositions[a];
       const vb = weldedPositions[b];
 
@@ -773,22 +862,7 @@ function detectBoundaryForActiveModel() {
       const pb = vb.clone().applyMatrix4(child.matrixWorld);
 
       segmentPositions.push(pa.x, pa.y, pa.z, pb.x, pb.y, pb.z);
-      localSegments += 1;
     });
-
-    if (!localSegments) {
-      edges.forEach(([a, b]) => {
-        if (labels[a] === labels[b]) {
-          return;
-        }
-
-        const va = weldedPositions[a];
-        const vb = weldedPositions[b];
-        const pa = va.clone().applyMatrix4(child.matrixWorld);
-        const pb = vb.clone().applyMatrix4(child.matrixWorld);
-        segmentPositions.push(pa.x, pa.y, pa.z, pb.x, pb.y, pb.z);
-      });
-    }
   });
 
   if (!segmentPositions.length) {
