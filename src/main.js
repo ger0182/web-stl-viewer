@@ -577,23 +577,40 @@ function detectBoundaryForActiveModel() {
       return;
     }
 
-    let normal = geometry.getAttribute("normal");
-    if (!normal || normal.count !== position.count) {
-      geometry.computeVertexNormals();
-      normal = geometry.getAttribute("normal");
+    const index = geometry.getIndex();
+    const vertexCount = position.count;
+    const vertexToWeld = new Uint32Array(vertexCount);
+    const weldedPositions = [];
+    const weldMap = new Map();
+
+    // Weld duplicated vertices so STL models (non-indexed) can build true neighborhood.
+    for (let i = 0; i < vertexCount; i += 1) {
+      const x = position.getX(i);
+      const y = position.getY(i);
+      const z = position.getZ(i);
+      const key = `${Math.round(x * 10000)}_${Math.round(y * 10000)}_${Math.round(z * 10000)}`;
+      let weldId = weldMap.get(key);
+      if (weldId === undefined) {
+        weldId = weldedPositions.length;
+        weldMap.set(key, weldId);
+        weldedPositions.push(new THREE.Vector3(x, y, z));
+      }
+      vertexToWeld[i] = weldId;
     }
 
-    if (!normal || normal.count !== position.count) {
+    const weldedCount = weldedPositions.length;
+    if (weldedCount < 3) {
       return;
     }
 
-    const index = geometry.getIndex();
-    const vertexCount = position.count;
-    const neighbors = Array.from({ length: vertexCount }, () => new Set());
+    const neighbors = Array.from({ length: weldedCount }, () => new Set());
     const edges = [];
     const edgeSet = new Set();
     const readIndex = (idx) => (index ? index.getX(idx) : idx);
-    const triCount = index ? index.count / 3 : vertexCount / 3;
+    const triCount = index ? index.count / 3 : Math.floor(vertexCount / 3);
+
+    const normalSum = Array.from({ length: weldedCount }, () => new THREE.Vector3());
+    const avgNormal = Array.from({ length: weldedCount }, () => new THREE.Vector3(0, 0, 1));
 
     const addEdge = (a, b) => {
       if (a === b) return;
@@ -609,35 +626,68 @@ function detectBoundaryForActiveModel() {
     };
 
     for (let tri = 0; tri < triCount; tri += 1) {
-      const ia = readIndex(tri * 3);
-      const ib = readIndex(tri * 3 + 1);
-      const ic = readIndex(tri * 3 + 2);
+      const ia = vertexToWeld[readIndex(tri * 3)];
+      const ib = vertexToWeld[readIndex(tri * 3 + 1)];
+      const ic = vertexToWeld[readIndex(tri * 3 + 2)];
+      if (ia === ib || ib === ic || ic === ia) {
+        continue;
+      }
+
       addEdge(ia, ib);
       addEdge(ib, ic);
       addEdge(ic, ia);
+
+      const a = weldedPositions[ia];
+      const b = weldedPositions[ib];
+      const c = weldedPositions[ic];
+      const triNormal = new THREE.Vector3().crossVectors(
+        new THREE.Vector3().subVectors(b, a),
+        new THREE.Vector3().subVectors(c, a),
+      );
+
+      if (triNormal.lengthSq() > 1e-12) {
+        triNormal.normalize();
+        normalSum[ia].add(triNormal);
+        normalSum[ib].add(triNormal);
+        normalSum[ic].add(triNormal);
+      }
     }
 
-    const feature = new Float32Array(vertexCount);
-    for (let i = 0; i < vertexCount; i += 1) {
-      const nx = normal.getX(i);
-      const ny = normal.getY(i);
-      const nz = normal.getZ(i);
+    for (let i = 0; i < weldedCount; i += 1) {
+      if (normalSum[i].lengthSq() > 1e-12) {
+        avgNormal[i].copy(normalSum[i]).normalize();
+      }
+    }
+
+    let minZ = Infinity;
+    let maxZ = -Infinity;
+    for (let i = 0; i < weldedCount; i += 1) {
+      const z = weldedPositions[i].z;
+      minZ = Math.min(minZ, z);
+      maxZ = Math.max(maxZ, z);
+    }
+    const zRange = Math.max(maxZ - minZ, 1e-8);
+
+    const feature = new Float32Array(weldedCount);
+    for (let i = 0; i < weldedCount; i += 1) {
       let sum = 0;
       let count = 0;
 
       neighbors[i].forEach((j) => {
-        const dot = nx * normal.getX(j) + ny * normal.getY(j) + nz * normal.getZ(j);
+        const dot = avgNormal[i].dot(avgNormal[j]);
         sum += 1 - Math.max(-1, Math.min(1, dot));
         count += 1;
       });
 
-      feature[i] = count > 0 ? sum / count : 0;
+      const curvatureLike = count > 0 ? sum / count : 0;
+      const zNorm = (weldedPositions[i].z - minZ) / zRange;
+      feature[i] = curvatureLike + zNorm * 0.12;
     }
 
-    // Simple smoothing to stabilize noisy scans.
+    // Smooth feature to stabilize noisy scans.
     for (let iter = 0; iter < 2; iter += 1) {
-      const smoothed = new Float32Array(vertexCount);
-      for (let i = 0; i < vertexCount; i += 1) {
+      const smoothed = new Float32Array(weldedCount);
+      for (let i = 0; i < weldedCount; i += 1) {
         let sum = feature[i];
         let count = 1;
         neighbors[i].forEach((j) => {
@@ -651,19 +701,29 @@ function detectBoundaryForActiveModel() {
 
     let c0 = Infinity;
     let c1 = -Infinity;
-    for (let i = 0; i < vertexCount; i += 1) {
+    for (let i = 0; i < weldedCount; i += 1) {
       c0 = Math.min(c0, feature[i]);
       c1 = Math.max(c1, feature[i]);
     }
 
-    const labels = new Uint8Array(vertexCount);
+    const labels = new Uint8Array(weldedCount);
+    const values = Array.from(feature);
+    values.sort((a, b) => a - b);
+    const median = values[Math.floor(values.length / 2)] || 0;
+
+    if (Math.abs(c1 - c0) < 1e-8) {
+      for (let i = 0; i < weldedCount; i += 1) {
+        labels[i] = feature[i] >= median ? 1 : 0;
+      }
+    }
+
     for (let iter = 0; iter < 10; iter += 1) {
       let s0 = 0;
       let s1 = 0;
       let n0 = 0;
       let n1 = 0;
 
-      for (let i = 0; i < vertexCount; i += 1) {
+      for (let i = 0; i < weldedCount; i += 1) {
         const d0 = Math.abs(feature[i] - c0);
         const d1 = Math.abs(feature[i] - c1);
         labels[i] = d0 <= d1 ? 0 : 1;
@@ -678,6 +738,13 @@ function detectBoundaryForActiveModel() {
 
       if (n0 > 0) c0 = s0 / n0;
       if (n1 > 0) c1 = s1 / n1;
+
+      if (n0 === 0 || n1 === 0) {
+        for (let i = 0; i < weldedCount; i += 1) {
+          labels[i] = feature[i] >= median ? 1 : 0;
+        }
+        break;
+      }
     }
 
     child.updateWorldMatrix(true, false);
@@ -686,15 +753,11 @@ function detectBoundaryForActiveModel() {
         return;
       }
 
-      const ax = position.getX(a);
-      const ay = position.getY(a);
-      const az = position.getZ(a);
-      const bx = position.getX(b);
-      const by = position.getY(b);
-      const bz = position.getZ(b);
+      const va = weldedPositions[a];
+      const vb = weldedPositions[b];
 
-      const pa = new THREE.Vector3(ax, ay, az).applyMatrix4(child.matrixWorld);
-      const pb = new THREE.Vector3(bx, by, bz).applyMatrix4(child.matrixWorld);
+      const pa = va.clone().applyMatrix4(child.matrixWorld);
+      const pb = vb.clone().applyMatrix4(child.matrixWorld);
 
       segmentPositions.push(pa.x, pa.y, pa.z, pb.x, pb.y, pb.z);
     });
