@@ -15,6 +15,7 @@ const viewToolbar = document.getElementById("viewToolbar");
 const modelInfo = document.getElementById("modelInfo");
 const renderSolidBtn = document.getElementById("renderSolid");
 const renderWireBtn = document.getElementById("renderWire");
+const detectBoundaryBtn = document.getElementById("detectBoundaryBtn");
 const sectionSlider = document.getElementById("sectionSlider");
 const sectionStep = document.getElementById("sectionStep");
 const sectionValue = document.getElementById("sectionValue");
@@ -88,6 +89,17 @@ const sectionLineGroup = new THREE.Group();
 sectionLineGroup.visible = false;
 scene.add(sectionLineGroup);
 
+const boundaryLineMaterial = new LineMaterial({
+  color: 0x00a63f,
+  linewidth: 4,
+  transparent: true,
+  opacity: 0.95,
+  depthTest: true,
+});
+const boundaryLineGroup = new THREE.Group();
+boundaryLineGroup.visible = false;
+scene.add(boundaryLineGroup);
+
 const sectionFrameMaterial = new THREE.LineBasicMaterial({
   color: sectionFillColor.value,
   transparent: true,
@@ -110,8 +122,18 @@ function resizeRenderer() {
   const height = viewerWrap.clientHeight;
   renderer.setSize(width, height, false);
   sectionLineMaterial.resolution.set(width, height);
+  boundaryLineMaterial.resolution.set(width, height);
   camera.aspect = width / height;
   camera.updateProjectionMatrix();
+}
+
+function clearBoundaryLines() {
+  while (boundaryLineGroup.children.length > 0) {
+    const child = boundaryLineGroup.children[0];
+    boundaryLineGroup.remove(child);
+    child.geometry?.dispose();
+  }
+  boundaryLineGroup.visible = false;
 }
 
 function fitCameraToAllModels() {
@@ -504,6 +526,7 @@ function applyRenderMode(mode) {
 
 function setActiveModel(modelId) {
   activeModelId = modelId;
+  clearBoundaryLines();
 
   modelItems.forEach((item) => {
     item.object3D.traverse((child) => {
@@ -530,6 +553,165 @@ function setActiveModel(modelId) {
 
   const selected = modelItems.find((item) => item.id === modelId) || null;
   updateModelInfoPanel(selected);
+}
+
+function detectBoundaryForActiveModel() {
+  clearBoundaryLines();
+
+  const targetItem = modelItems.find((item) => item.id === activeModelId);
+  if (!targetItem) {
+    fileName.textContent = "請先左鍵選取要辨識的模型";
+    return;
+  }
+
+  const segmentPositions = [];
+
+  targetItem.object3D.traverse((child) => {
+    if (!child.isMesh || !child.geometry) {
+      return;
+    }
+
+    const geometry = child.geometry;
+    const position = geometry.getAttribute("position");
+    if (!position || position.count < 3) {
+      return;
+    }
+
+    let normal = geometry.getAttribute("normal");
+    if (!normal || normal.count !== position.count) {
+      geometry.computeVertexNormals();
+      normal = geometry.getAttribute("normal");
+    }
+
+    if (!normal || normal.count !== position.count) {
+      return;
+    }
+
+    const index = geometry.getIndex();
+    const vertexCount = position.count;
+    const neighbors = Array.from({ length: vertexCount }, () => new Set());
+    const edges = [];
+    const edgeSet = new Set();
+    const readIndex = (idx) => (index ? index.getX(idx) : idx);
+    const triCount = index ? index.count / 3 : vertexCount / 3;
+
+    const addEdge = (a, b) => {
+      if (a === b) return;
+      neighbors[a].add(b);
+      neighbors[b].add(a);
+      const min = Math.min(a, b);
+      const max = Math.max(a, b);
+      const key = `${min}_${max}`;
+      if (!edgeSet.has(key)) {
+        edgeSet.add(key);
+        edges.push([min, max]);
+      }
+    };
+
+    for (let tri = 0; tri < triCount; tri += 1) {
+      const ia = readIndex(tri * 3);
+      const ib = readIndex(tri * 3 + 1);
+      const ic = readIndex(tri * 3 + 2);
+      addEdge(ia, ib);
+      addEdge(ib, ic);
+      addEdge(ic, ia);
+    }
+
+    const feature = new Float32Array(vertexCount);
+    for (let i = 0; i < vertexCount; i += 1) {
+      const nx = normal.getX(i);
+      const ny = normal.getY(i);
+      const nz = normal.getZ(i);
+      let sum = 0;
+      let count = 0;
+
+      neighbors[i].forEach((j) => {
+        const dot = nx * normal.getX(j) + ny * normal.getY(j) + nz * normal.getZ(j);
+        sum += 1 - Math.max(-1, Math.min(1, dot));
+        count += 1;
+      });
+
+      feature[i] = count > 0 ? sum / count : 0;
+    }
+
+    // Simple smoothing to stabilize noisy scans.
+    for (let iter = 0; iter < 2; iter += 1) {
+      const smoothed = new Float32Array(vertexCount);
+      for (let i = 0; i < vertexCount; i += 1) {
+        let sum = feature[i];
+        let count = 1;
+        neighbors[i].forEach((j) => {
+          sum += feature[j];
+          count += 1;
+        });
+        smoothed[i] = sum / count;
+      }
+      feature.set(smoothed);
+    }
+
+    let c0 = Infinity;
+    let c1 = -Infinity;
+    for (let i = 0; i < vertexCount; i += 1) {
+      c0 = Math.min(c0, feature[i]);
+      c1 = Math.max(c1, feature[i]);
+    }
+
+    const labels = new Uint8Array(vertexCount);
+    for (let iter = 0; iter < 10; iter += 1) {
+      let s0 = 0;
+      let s1 = 0;
+      let n0 = 0;
+      let n1 = 0;
+
+      for (let i = 0; i < vertexCount; i += 1) {
+        const d0 = Math.abs(feature[i] - c0);
+        const d1 = Math.abs(feature[i] - c1);
+        labels[i] = d0 <= d1 ? 0 : 1;
+        if (labels[i] === 0) {
+          s0 += feature[i];
+          n0 += 1;
+        } else {
+          s1 += feature[i];
+          n1 += 1;
+        }
+      }
+
+      if (n0 > 0) c0 = s0 / n0;
+      if (n1 > 0) c1 = s1 / n1;
+    }
+
+    child.updateWorldMatrix(true, false);
+    edges.forEach(([a, b]) => {
+      if (labels[a] === labels[b]) {
+        return;
+      }
+
+      const ax = position.getX(a);
+      const ay = position.getY(a);
+      const az = position.getZ(a);
+      const bx = position.getX(b);
+      const by = position.getY(b);
+      const bz = position.getZ(b);
+
+      const pa = new THREE.Vector3(ax, ay, az).applyMatrix4(child.matrixWorld);
+      const pb = new THREE.Vector3(bx, by, bz).applyMatrix4(child.matrixWorld);
+
+      segmentPositions.push(pa.x, pa.y, pa.z, pb.x, pb.y, pb.z);
+    });
+  });
+
+  if (!segmentPositions.length) {
+    fileName.textContent = "交界辨識完成，但未找到明顯分界";
+    return;
+  }
+
+  const lineGeometry = new LineSegmentsGeometry();
+  lineGeometry.setPositions(segmentPositions);
+  const lines = new LineSegments2(lineGeometry, boundaryLineMaterial);
+  lines.computeLineDistances();
+  boundaryLineGroup.add(lines);
+  boundaryLineGroup.visible = true;
+  fileName.textContent = `交界辨識完成：${targetItem.fileName}`;
 }
 
 function updateModelInfoPanel(modelItem) {
@@ -659,6 +841,7 @@ async function handleSelectedFile(selectedFile) {
 
     modelItems.push(modelItem);
     scene.add(model);
+    clearBoundaryLines();
     updateSectionSliderRange();
     fitCameraToAllModels();
     setActiveModel(id);
@@ -762,6 +945,10 @@ renderSolidBtn.addEventListener("click", () => {
 
 renderWireBtn.addEventListener("click", () => {
   applyRenderMode("wire");
+});
+
+detectBoundaryBtn.addEventListener("click", () => {
+  detectBoundaryForActiveModel();
 });
 
 sectionStep.addEventListener("change", () => {

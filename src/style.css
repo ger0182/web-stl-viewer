@@ -107,6 +107,17 @@ body {
   border-color: #111827;
 }
 
+.action-btn {
+  border: 1px solid #d1d5db;
+  background: #ffffff;
+  color: #111827;
+  border-radius: 8px;
+  height: 32px;
+  padding: 0 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
 .section-panel {
   position: absolute;
   right: 12px;
