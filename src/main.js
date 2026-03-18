@@ -17,7 +17,14 @@ const modelInfo = document.getElementById("modelInfo");
 const renderSolidBtn = document.getElementById("renderSolid");
 const renderWireBtn = document.getElementById("renderWire");
 const detectBoundaryBtn = document.getElementById("detectBoundaryBtn");
-const exportSlicesBtn = document.getElementById("exportSlicesBtn");
+const enterSlicePreviewBtn = document.getElementById("enterSlicePreviewBtn");
+const slicePreviewOverlay = document.getElementById("slicePreviewOverlay");
+const slicePreviewCanvas = document.getElementById("slicePreviewCanvas");
+const previewZSlider = document.getElementById("previewZSlider");
+const previewZValue = document.getElementById("previewZValue");
+const previewPerfText = document.getElementById("previewPerfText");
+const previewBackBtn = document.getElementById("previewBackBtn");
+const previewExportBtn = document.getElementById("previewExportBtn");
 const sectionSlider = document.getElementById("sectionSlider");
 const sectionStep = document.getElementById("sectionStep");
 const sectionValue = document.getElementById("sectionValue");
@@ -74,6 +81,11 @@ let renderMode = "solid";
 let sectionHeight = 0;
 let isRightDragging = false;
 let rightDragPointerId = null;
+let isSlicePreviewMode = false;
+let previewRequestToken = 0;
+let previewSliceCache = null;
+let previewSliceTargetItem = null;
+let previewSliceBounds = null;
 
 const raycaster = new THREE.Raycaster();
 const pointer = new THREE.Vector2();
@@ -393,14 +405,13 @@ function buildClosedLoopsFromSegments(segmentPoints, tolerancePixels = 1.5) {
   return loops;
 }
 
-function renderSliceToPngBlob(segmentPoints, zValue, renderSettings) {
+function drawSliceOnCanvas(targetCanvas, segmentPoints, zValue, renderSettings) {
   const { outputWidth, outputHeight, platformWidth, platformHeight, centerX, centerY } = renderSettings;
-  const canvas2d = document.createElement("canvas");
   const sizeW = outputWidth;
   const sizeH = outputHeight;
-  canvas2d.width = sizeW;
-  canvas2d.height = sizeH;
-  const ctx = canvas2d.getContext("2d");
+  targetCanvas.width = sizeW;
+  targetCanvas.height = sizeH;
+  const ctx = targetCanvas.getContext("2d");
 
   ctx.fillStyle = "#000000";
   ctx.fillRect(0, 0, sizeW, sizeH);
@@ -454,6 +465,11 @@ function renderSliceToPngBlob(segmentPoints, zValue, renderSettings) {
   ctx.fillStyle = "#ffffff";
   ctx.font = `${Math.max(18, Math.round(sizeH * 0.02))}px Segoe UI`;
   ctx.fillText(`Z = ${zValue.toFixed(2)}`, 20, Math.max(30, Math.round(sizeH * 0.03)));
+}
+
+function renderSliceToPngBlob(segmentPoints, zValue, renderSettings) {
+  const canvas2d = document.createElement("canvas");
+  drawSliceOnCanvas(canvas2d, segmentPoints, zValue, renderSettings);
 
   return new Promise((resolve) => {
     canvas2d.toBlob((blob) => {
@@ -501,14 +517,14 @@ async function saveZipBlob(blob, fileNameToSave, saveHandle = null) {
 }
 
 async function exportSectionSlicesAsZip() {
-  const targetItem = modelItems.find((item) => item.id === activeModelId) || modelItems[0];
+  const targetItem = previewSliceTargetItem || modelItems.find((item) => item.id === activeModelId) || modelItems[0];
   if (!targetItem) {
     fileName.textContent = "請先上傳並選取模型後再匯出剖面";
     return;
   }
 
   const step = Math.max(0.01, Number(sectionStep.value) || 1);
-  const box = new THREE.Box3().setFromObject(targetItem.object3D);
+  const box = previewSliceBounds || new THREE.Box3().setFromObject(targetItem.object3D);
   const minZ = Math.max(0, box.min.z);
   const maxZ = Math.max(minZ, box.max.z);
 
@@ -536,7 +552,15 @@ async function exportSectionSlicesAsZip() {
 
   const zip = new JSZip();
   const total = Math.floor((maxZ - minZ) / step) + 1;
-  const sliceCache = buildSliceTriangleCache(targetItem.object3D);
+  const sliceCache =
+    previewSliceCache && previewSliceTargetItem?.id === targetItem.id
+      ? {
+          triangles: previewSliceCache.triangles.slice(),
+          triMinZ: previewSliceCache.triMinZ.slice(),
+          triMaxZ: previewSliceCache.triMaxZ.slice(),
+          triCount: previewSliceCache.triCount,
+        }
+      : buildSliceTriangleCache(targetItem.object3D);
 
   if (!sliceCache.triCount) {
     fileName.textContent = "模型沒有可用三角形，無法輸出剖面";
@@ -618,6 +642,10 @@ function resizeRenderer() {
   boundaryLineMaterial.resolution.set(width, height);
   camera.aspect = width / height;
   camera.updateProjectionMatrix();
+
+  if (isSlicePreviewMode) {
+    updateSlicePreviewAtZ(Number(previewZSlider.value || 0));
+  }
 }
 
 function clearBoundaryLines() {
@@ -1005,6 +1033,125 @@ function updateSectionFillMesh() {
   sectionFrameLine.scale.set(planeSize, planeSize, 1);
   sectionFrameLine.position.set(center.x, center.y, sectionHeight + 0.001);
   sectionFrameMaterial.color.set(sectionFillColor.value);
+}
+
+function getCurrentSliceRenderSettings() {
+  const platformWidth = Math.max(1, Number(platformWidthInput.value) || 192);
+  const platformHeight = Math.max(1, Number(platformHeightInput.value) || 120);
+  const outputWidth = Math.max(128, Math.floor(Number(exportWidthInput.value) || 2560));
+  const outputHeight = Math.max(128, Math.floor(Number(exportHeightInput.value) || 1600));
+
+  const bounds = previewSliceBounds || getSceneBounds();
+  const center = bounds ? bounds.getCenter(new THREE.Vector3()) : new THREE.Vector3();
+
+  return {
+    platformWidth,
+    platformHeight,
+    outputWidth,
+    outputHeight,
+    centerX: center.x,
+    centerY: center.y,
+  };
+}
+
+function getPreviewRenderSettings() {
+  const base = getCurrentSliceRenderSettings();
+  const width = Math.max(320, Math.floor(slicePreviewCanvas.clientWidth || viewerWrap.clientWidth || 1280));
+  const height = Math.max(320, Math.floor(slicePreviewCanvas.clientHeight || viewerWrap.clientHeight || 720));
+
+  return {
+    ...base,
+    outputWidth: width,
+    outputHeight: height,
+  };
+}
+
+async function updateSlicePreviewAtZ(zValue) {
+  if (!isSlicePreviewMode || !previewSliceCache) {
+    return;
+  }
+
+  const token = ++previewRequestToken;
+  const startTime = performance.now();
+  previewZValue.textContent = `Z: ${Number(zValue).toFixed(2)}`;
+
+  let segments;
+  if (sliceWorkerReady) {
+    try {
+      segments = await computeSliceSegmentsWithWorker(zValue);
+    } catch (error) {
+      console.warn("預覽 worker 計算失敗，改主執行緒", error);
+      segments = new Float32Array(computeSectionSegmentsAtZ(previewSliceCache, zValue));
+    }
+  } else {
+    segments = new Float32Array(computeSectionSegmentsAtZ(previewSliceCache, zValue));
+  }
+
+  if (token !== previewRequestToken) {
+    return;
+  }
+
+  drawSliceOnCanvas(slicePreviewCanvas, segments, zValue, getPreviewRenderSettings());
+  const elapsed = performance.now() - startTime;
+  previewPerfText.textContent = `計算：${elapsed.toFixed(1)} ms`;
+}
+
+async function enterSlicePreviewMode() {
+  const targetItem = modelItems.find((item) => item.id === activeModelId) || modelItems[0];
+  if (!targetItem) {
+    fileName.textContent = "請先上傳模型再切換切層預覽";
+    return;
+  }
+
+  const bounds = new THREE.Box3().setFromObject(targetItem.object3D);
+  const minZ = Math.max(0, bounds.min.z);
+  const maxZ = Math.max(minZ, bounds.max.z);
+  if (maxZ - minZ < 1e-6) {
+    fileName.textContent = "模型 Z 高度範圍不足，無法切層預覽";
+    return;
+  }
+
+  const cache = buildSliceTriangleCache(targetItem.object3D);
+  if (!cache.triCount) {
+    fileName.textContent = "模型沒有可用三角形，無法切層預覽";
+    return;
+  }
+
+  previewSliceTargetItem = targetItem;
+  previewSliceBounds = bounds;
+  previewSliceCache = cache;
+
+  try {
+    await initSliceWorkerWithCache({
+      triangles: cache.triangles.slice(),
+      triMinZ: cache.triMinZ.slice(),
+      triMaxZ: cache.triMaxZ.slice(),
+      triCount: cache.triCount,
+    });
+  } catch (error) {
+    console.warn("預覽模式 worker 初始化失敗，改用主執行緒", error);
+  }
+
+  previewZSlider.min = `${minZ}`;
+  previewZSlider.max = `${maxZ}`;
+  previewZSlider.step = `${Math.max(0.01, Number(sectionStep.value) || 1)}`;
+  const startZ = Math.min(Math.max(Number(sectionSlider.value || minZ), minZ), maxZ);
+  previewZSlider.value = `${startZ}`;
+
+  isSlicePreviewMode = true;
+  slicePreviewOverlay.classList.remove("is-hidden");
+  enterSlicePreviewBtn.style.display = "none";
+  renderer.domElement.style.visibility = "hidden";
+
+  await updateSlicePreviewAtZ(startZ);
+}
+
+function exitSlicePreviewMode() {
+  isSlicePreviewMode = false;
+  previewRequestToken += 1;
+  slicePreviewOverlay.classList.add("is-hidden");
+  enterSlicePreviewBtn.style.display = "";
+  renderer.domElement.style.visibility = "visible";
 }
 
 function applyRenderMode(mode) {
@@ -1611,7 +1758,15 @@ detectBoundaryBtn.addEventListener("click", () => {
   detectBoundaryForActiveModel();
 });
 
-exportSlicesBtn.addEventListener("click", async () => {
+enterSlicePreviewBtn.addEventListener("click", async () => {
+  await enterSlicePreviewMode();
+});
+
+previewBackBtn.addEventListener("click", () => {
+  exitSlicePreviewMode();
+});
+
+previewExportBtn.addEventListener("click", async () => {
   await exportSectionSlicesAsZip();
 });
 
@@ -1624,10 +1779,15 @@ sectionStep.addEventListener("change", () => {
   const validStep = Number.isFinite(parsedStep) && parsedStep > 0 ? parsedStep : 1;
   sectionStep.value = `${validStep}`;
   sectionSlider.step = `${validStep}`;
+  previewZSlider.step = `${validStep}`;
 });
 
 sectionSlider.addEventListener("input", () => {
   updateSectionPlane(Number(sectionSlider.value));
+});
+
+previewZSlider.addEventListener("input", async () => {
+  await updateSlicePreviewAtZ(Number(previewZSlider.value));
 });
 
 sectionFillToggle.addEventListener("change", () => {

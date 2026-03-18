@@ -93,14 +93,6 @@
             >
               交界辨識
             </button>
-            <button
-              id="exportSlicesBtn"
-              class="action-btn"
-              type="button"
-              title="輸出所有剖面 PNG 並壓縮成 ZIP"
-            >
-              匯出剖面
-            </button>
           </div>
         </div>
 
@@ -134,14 +126,38 @@
 
           <label>平台尺寸 (X × Y)</label>
           <div class="size-grid">
-            <input id="platformWidth" type="number" min="1" step="0.1" value="192" />
-            <input id="platformHeight" type="number" min="1" step="0.1" value="120" />
+            <input
+              id="platformWidth"
+              type="number"
+              min="1"
+              step="0.1"
+              value="192"
+            />
+            <input
+              id="platformHeight"
+              type="number"
+              min="1"
+              step="0.1"
+              value="120"
+            />
           </div>
 
           <label>輸出解析度 (W × H)</label>
           <div class="size-grid">
-            <input id="exportWidth" type="number" min="128" step="1" value="2560" />
-            <input id="exportHeight" type="number" min="128" step="1" value="1600" />
+            <input
+              id="exportWidth"
+              type="number"
+              min="128"
+              step="1"
+              value="2560"
+            />
+            <input
+              id="exportHeight"
+              type="number"
+              min="128"
+              step="1"
+              value="1600"
+            />
           </div>
 
           <div id="sectionValue" class="section-value">Z: 0</div>
@@ -168,6 +184,39 @@
         </aside>
 
         <canvas id="viewerCanvas"></canvas>
+
+        <button
+          id="enterSlicePreviewBtn"
+          class="slice-preview-entry-btn"
+          type="button"
+          title="切換到切層預覽模式"
+        >
+          切層
+        </button>
+
+        <div id="slicePreviewOverlay" class="slice-preview-overlay is-hidden">
+          <canvas id="slicePreviewCanvas" class="slice-preview-canvas"></canvas>
+          <aside class="slice-preview-side">
+            <div class="panel-title">切層預覽</div>
+            <div id="previewZValue" class="section-value">Z: 0</div>
+            <input
+              id="previewZSlider"
+              class="section-slider"
+              type="range"
+              min="0"
+              max="0"
+              step="1"
+              value="0"
+            />
+            <div id="previewPerfText" class="preview-perf">計算：- ms</div>
+          </aside>
+
+          <div class="slice-preview-actions">
+            <button id="previewBackBtn" class="action-btn" type="button">返回</button>
+            <button id="previewExportBtn" class="action-btn" type="button">輸出</button>
+          </div>
+        </div>
+
         <div id="hint" class="hint">
           可拖拉 STL/OBJ 到此上傳｜右鍵旋轉、中鍵平移、滾輪縮放、左鍵選取
         </div>
