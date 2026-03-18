@@ -257,20 +257,29 @@ function renderSliceToPngBlob(segmentPoints, zValue) {
   });
 }
 
-async function saveZipBlob(blob, fileNameToSave) {
-  if (window.showSaveFilePicker) {
-    const handle = await window.showSaveFilePicker({
-      suggestedName: fileNameToSave,
-      types: [
-        {
-          description: "ZIP 檔案",
-          accept: {
-            "application/zip": [".zip"],
-          },
+async function requestZipSaveHandle(fileNameToSave) {
+  if (!window.showSaveFilePicker) {
+    return null;
+  }
+
+  const handle = await window.showSaveFilePicker({
+    suggestedName: fileNameToSave,
+    types: [
+      {
+        description: "ZIP 檔案",
+        accept: {
+          "application/zip": [".zip"],
         },
-      ],
-    });
-    const writable = await handle.createWritable();
+      },
+    ],
+  });
+
+  return handle;
+}
+
+async function saveZipBlob(blob, fileNameToSave, saveHandle = null) {
+  if (saveHandle) {
+    const writable = await saveHandle.createWritable();
     await writable.write(blob);
     await writable.close();
     return;
@@ -303,6 +312,23 @@ async function exportSectionSlicesAsZip() {
     return;
   }
 
+  const zipFileName = `${targetItem.fileName.replace(/\.[^.]+$/, "").replace(/[\\/:*?"<>|]/g, "_")}_sections.zip`;
+
+  let saveHandle = null;
+  if (window.showSaveFilePicker) {
+    try {
+      saveHandle = await requestZipSaveHandle(zipFileName);
+    } catch (error) {
+      if (error?.name === "AbortError") {
+        fileName.textContent = "已取消儲存剖面 ZIP";
+        return;
+      }
+
+      console.warn("預先取得儲存位置失敗，改用下載方式", error);
+      saveHandle = null;
+    }
+  }
+
   const zip = new JSZip();
   const total = Math.floor((maxZ - minZ) / step) + 1;
 
@@ -328,10 +354,9 @@ async function exportSectionSlicesAsZip() {
   }
 
   const zipBlob = await zip.generateAsync({ type: "blob" });
-  const zipFileName = `${targetItem.fileName.replace(/\.[^.]+$/, "")}_sections.zip`;
 
   try {
-    await saveZipBlob(zipBlob, zipFileName);
+    await saveZipBlob(zipBlob, zipFileName, saveHandle);
     fileName.textContent = `剖面匯出完成：${zipFileName}`;
   } catch (error) {
     if (error?.name === "AbortError") {
