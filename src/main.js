@@ -632,14 +632,6 @@ async function exportSectionSlicesAsZip() {
   const outputHeight = Math.max(128, Math.floor(Number(exportHeightInput.value) || 1600));
   const modelCenter = box.getCenter(new THREE.Vector3());
 
-  let workerEnabled = true;
-  try {
-    await initSliceWorkerWithCache(sliceCache);
-  } catch (error) {
-    console.warn("slice worker 啟動失敗，改用主執行緒", error);
-    workerEnabled = false;
-  }
-
   fileName.textContent = `剖面匯出中：0/${total}`;
 
   let generated = 0;
@@ -650,30 +642,29 @@ async function exportSectionSlicesAsZip() {
       z = maxZ;
     }
 
-    let segments;
-    if (workerEnabled) {
-      segments = await computeSliceSegmentsWithWorker(z);
-    } else {
-      segments = new Float32Array(computeSectionSegmentsAtZ(sliceCache, z));
-    }
-
-    const pngBlob = await renderSliceToPngBlob(segments, z, {
-      platformWidth,
-      platformHeight,
-      outputWidth,
-      outputHeight,
-      centerX: modelCenter.x,
-      centerY: modelCenter.y,
-    });
-    if (pngBlob) {
-      const safeModelName = targetItem.fileName.replace(/\.[^.]+$/, "").replace(/[^a-zA-Z0-9_-]/g, "_");
-      const fileNameInZip = `${safeModelName}_z_${z.toFixed(2).replace(".", "_")}.png`;
-      zip.file(fileNameInZip, pngBlob);
-      addedPngCount += 1;
-    }
-
     generated += 1;
     fileName.textContent = `剖面匯出中：${generated}/${total}`;
+
+    try {
+      const segments = new Float32Array(computeSectionSegmentsAtZ(sliceCache, z));
+      const pngBlob = await renderSliceToPngBlob(segments, z, {
+        platformWidth,
+        platformHeight,
+        outputWidth,
+        outputHeight,
+        centerX: modelCenter.x,
+        centerY: modelCenter.y,
+      });
+
+      if (pngBlob) {
+        const safeModelName = targetItem.fileName.replace(/\.[^.]+$/, "").replace(/[^a-zA-Z0-9_-]/g, "_");
+        const fileNameInZip = `${safeModelName}_z_${z.toFixed(2).replace(".", "_")}.png`;
+        zip.file(fileNameInZip, pngBlob);
+        addedPngCount += 1;
+      }
+    } catch (sliceError) {
+      console.warn(`第 ${generated} 層輸出失敗，略過`, sliceError);
+    }
 
     if (generated % 20 === 0) {
       await new Promise((resolve) => setTimeout(resolve, 0));
