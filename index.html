@@ -131,6 +131,19 @@
             />
             <span id="boundarySensitivityValue">60</span>
           </div>
+
+          <label>平台尺寸 (X × Y)</label>
+          <div class="size-grid">
+            <input id="platformWidth" type="number" min="1" step="0.1" value="192" />
+            <input id="platformHeight" type="number" min="1" step="0.1" value="120" />
+          </div>
+
+          <label>輸出解析度 (W × H)</label>
+          <div class="size-grid">
+            <input id="exportWidth" type="number" min="128" step="1" value="2560" />
+            <input id="exportHeight" type="number" min="128" step="1" value="1600" />
+          </div>
+
           <div id="sectionValue" class="section-value">Z: 0</div>
           <div class="section-slider-wrap">
             <input

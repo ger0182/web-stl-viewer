@@ -25,6 +25,10 @@ const sectionFillToggle = document.getElementById("sectionFillToggle");
 const sectionFillColor = document.getElementById("sectionFillColor");
 const boundarySensitivity = document.getElementById("boundarySensitivity");
 const boundarySensitivityValue = document.getElementById("boundarySensitivityValue");
+const platformWidthInput = document.getElementById("platformWidth");
+const platformHeightInput = document.getElementById("platformHeight");
+const exportWidthInput = document.getElementById("exportWidth");
+const exportHeightInput = document.getElementById("exportHeight");
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0xe5e7eb);
@@ -121,6 +125,88 @@ sectionFrameLine.visible = false;
 sectionFrameLine.renderOrder = 3;
 scene.add(sectionFrameLine);
 
+let sliceWorker = null;
+let sliceWorkerReady = false;
+let sliceWorkerRequestId = 1;
+const sliceWorkerPending = new Map();
+
+function ensureSliceWorker() {
+  if (sliceWorker) {
+    return;
+  }
+
+  sliceWorker = new Worker(new URL("./workers/sliceWorker.js", import.meta.url), { type: "module" });
+  sliceWorker.onmessage = (event) => {
+    const data = event.data;
+
+    if (data.type === "inited") {
+      sliceWorkerReady = true;
+      return;
+    }
+
+    if (data.type === "sliceResult") {
+      const pending = sliceWorkerPending.get(data.requestId);
+      if (!pending) {
+        return;
+      }
+      sliceWorkerPending.delete(data.requestId);
+      pending.resolve(new Float32Array(data.segmentsBuffer));
+      return;
+    }
+  };
+
+  sliceWorker.onerror = (error) => {
+    sliceWorkerPending.forEach((pending) => pending.reject(error));
+    sliceWorkerPending.clear();
+    sliceWorkerReady = false;
+  };
+}
+
+async function initSliceWorkerWithCache(sliceCache) {
+  ensureSliceWorker();
+
+  const initPromise = new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      reject(new Error("slice worker init timeout"));
+    }, 15000);
+
+    const onReady = () => {
+      if (!sliceWorkerReady) {
+        requestAnimationFrame(onReady);
+        return;
+      }
+      clearTimeout(timeout);
+      resolve();
+    };
+
+    onReady();
+  });
+
+  sliceWorkerReady = false;
+  sliceWorker.postMessage({
+    type: "init",
+    trianglesBuffer: sliceCache.triangles.buffer,
+    triMinZBuffer: sliceCache.triMinZ.buffer,
+    triMaxZBuffer: sliceCache.triMaxZ.buffer,
+    triCount: sliceCache.triCount,
+  });
+
+  await initPromise;
+}
+
+function computeSliceSegmentsWithWorker(z) {
+  return new Promise((resolve, reject) => {
+    if (!sliceWorker || !sliceWorkerReady) {
+      reject(new Error("slice worker not ready"));
+      return;
+    }
+
+    const requestId = sliceWorkerRequestId++;
+    sliceWorkerPending.set(requestId, { resolve, reject });
+    sliceWorker.postMessage({ type: "slice", requestId, z });
+  });
+}
+
 function buildSliceTriangleCache(object3D) {
   const triangles = [];
   const triMinZ = [];
@@ -164,9 +250,9 @@ function buildSliceTriangleCache(object3D) {
   });
 
   return {
-    triangles,
-    triMinZ,
-    triMaxZ,
+    triangles: new Float32Array(triangles),
+    triMinZ: new Float32Array(triMinZ),
+    triMaxZ: new Float32Array(triMaxZ),
     triCount: triMinZ.length,
   };
 }
@@ -224,58 +310,150 @@ function computeSectionSegmentsAtZ(sliceCache, z0) {
   return segmentPoints;
 }
 
-function renderSliceToPngBlob(segmentPoints, zValue) {
-  const canvas2d = document.createElement("canvas");
-  const size = 1200;
-  const padding = 50;
-  canvas2d.width = size;
-  canvas2d.height = size;
-  const ctx = canvas2d.getContext("2d");
+function buildClosedLoopsFromSegments(segmentPoints, tolerancePixels = 1.5) {
+  const keyMap = new Map();
+  const vertices = [];
+  const adjacency = [];
+  const edges = [];
 
-  ctx.fillStyle = "#000000";
-  ctx.fillRect(0, 0, size, size);
-  ctx.lineCap = "round";
-  ctx.lineJoin = "round";
-  ctx.strokeStyle = "#ffffff";
-  ctx.lineWidth = 3;
+  const keyOf = (x, y) => `${Math.round(x / tolerancePixels)}_${Math.round(y / tolerancePixels)}`;
 
-  if (segmentPoints.length >= 4) {
-    let minX = Infinity;
-    let maxX = -Infinity;
-    let minY = Infinity;
-    let maxY = -Infinity;
-
-    for (let i = 0; i < segmentPoints.length; i += 2) {
-      const x = segmentPoints[i];
-      const y = segmentPoints[i + 1];
-      minX = Math.min(minX, x);
-      maxX = Math.max(maxX, x);
-      minY = Math.min(minY, y);
-      maxY = Math.max(maxY, y);
+  const getVertexId = (x, y) => {
+    const key = keyOf(x, y);
+    const existing = keyMap.get(key);
+    if (existing !== undefined) {
+      return existing;
     }
 
-    const width = Math.max(maxX - minX, 1e-6);
-    const height = Math.max(maxY - minY, 1e-6);
-    const scale = Math.min((size - padding * 2) / width, (size - padding * 2) / height);
-    const offsetX = (size - width * scale) / 2 - minX * scale;
-    const offsetY = (size - height * scale) / 2 - minY * scale;
+    const id = vertices.length;
+    keyMap.set(key, id);
+    vertices.push({ x, y });
+    adjacency.push([]);
+    return id;
+  };
 
-    for (let i = 0; i < segmentPoints.length; i += 4) {
-      const x1 = segmentPoints[i] * scale + offsetX;
-      const y1 = size - (segmentPoints[i + 1] * scale + offsetY);
-      const x2 = segmentPoints[i + 2] * scale + offsetX;
-      const y2 = size - (segmentPoints[i + 3] * scale + offsetY);
+  for (let i = 0; i < segmentPoints.length; i += 4) {
+    const x1 = segmentPoints[i];
+    const y1 = segmentPoints[i + 1];
+    const x2 = segmentPoints[i + 2];
+    const y2 = segmentPoints[i + 3];
+    const a = getVertexId(x1, y1);
+    const b = getVertexId(x2, y2);
+    if (a === b) {
+      continue;
+    }
+    const edgeId = edges.length;
+    edges.push({ a, b, used: false });
+    adjacency[a].push(edgeId);
+    adjacency[b].push(edgeId);
+  }
 
-      ctx.beginPath();
-      ctx.moveTo(x1, y1);
-      ctx.lineTo(x2, y2);
-      ctx.stroke();
+  const loops = [];
+
+  for (let i = 0; i < edges.length; i += 1) {
+    if (edges[i].used) {
+      continue;
+    }
+
+    edges[i].used = true;
+    let start = edges[i].a;
+    let current = edges[i].b;
+    const loop = [vertices[start], vertices[current]];
+    let guard = 0;
+
+    while (guard < edges.length * 2) {
+      guard += 1;
+      if (current === start) {
+        break;
+      }
+
+      let nextEdgeId = -1;
+      for (const candidateEdgeId of adjacency[current]) {
+        if (!edges[candidateEdgeId].used) {
+          nextEdgeId = candidateEdgeId;
+          break;
+        }
+      }
+
+      if (nextEdgeId === -1) {
+        break;
+      }
+
+      edges[nextEdgeId].used = true;
+      const edge = edges[nextEdgeId];
+      current = edge.a === current ? edge.b : edge.a;
+      loop.push(vertices[current]);
+    }
+
+    if (loop.length >= 4 && current === start) {
+      loops.push(loop);
     }
   }
 
+  return loops;
+}
+
+function renderSliceToPngBlob(segmentPoints, zValue, renderSettings) {
+  const { outputWidth, outputHeight, platformWidth, platformHeight, centerX, centerY } = renderSettings;
+  const canvas2d = document.createElement("canvas");
+  const sizeW = outputWidth;
+  const sizeH = outputHeight;
+  canvas2d.width = sizeW;
+  canvas2d.height = sizeH;
+  const ctx = canvas2d.getContext("2d");
+
+  ctx.fillStyle = "#000000";
+  ctx.fillRect(0, 0, sizeW, sizeH);
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  ctx.strokeStyle = "#ffffff";
+  ctx.lineWidth = 1.5;
+
+  const left = centerX - platformWidth / 2;
+  const bottom = centerY - platformHeight / 2;
+  const scaleX = sizeW / platformWidth;
+  const scaleY = sizeH / platformHeight;
+
+  const toPixelX = (x) => (x - left) * scaleX;
+  const toPixelY = (y) => sizeH - (y - bottom) * scaleY;
+
+  const pixelSegments = [];
+  for (let i = 0; i < segmentPoints.length; i += 4) {
+    pixelSegments.push(
+      toPixelX(segmentPoints[i]),
+      toPixelY(segmentPoints[i + 1]),
+      toPixelX(segmentPoints[i + 2]),
+      toPixelY(segmentPoints[i + 3]),
+    );
+  }
+
+  const loops = buildClosedLoopsFromSegments(pixelSegments, 1.8);
   ctx.fillStyle = "#ffffff";
-  ctx.font = "24px Segoe UI";
-  ctx.fillText(`Z = ${zValue.toFixed(2)}`, 24, 36);
+  loops.forEach((loop) => {
+    ctx.beginPath();
+    ctx.moveTo(loop[0].x, loop[0].y);
+    for (let i = 1; i < loop.length; i += 1) {
+      ctx.lineTo(loop[i].x, loop[i].y);
+    }
+    ctx.closePath();
+    ctx.fill();
+  });
+
+  for (let i = 0; i < pixelSegments.length; i += 4) {
+    const x1 = pixelSegments[i];
+    const y1 = pixelSegments[i + 1];
+    const x2 = pixelSegments[i + 2];
+    const y2 = pixelSegments[i + 3];
+
+    ctx.beginPath();
+    ctx.moveTo(x1, y1);
+    ctx.lineTo(x2, y2);
+    ctx.stroke();
+  }
+
+  ctx.fillStyle = "#ffffff";
+  ctx.font = `${Math.max(18, Math.round(sizeH * 0.02))}px Segoe UI`;
+  ctx.fillText(`Z = ${zValue.toFixed(2)}`, 20, Math.max(30, Math.round(sizeH * 0.03)));
 
   return new Promise((resolve) => {
     canvas2d.toBlob((blob) => {
@@ -365,6 +543,20 @@ async function exportSectionSlicesAsZip() {
     return;
   }
 
+  const platformWidth = Math.max(1, Number(platformWidthInput.value) || 192);
+  const platformHeight = Math.max(1, Number(platformHeightInput.value) || 120);
+  const outputWidth = Math.max(128, Math.floor(Number(exportWidthInput.value) || 2560));
+  const outputHeight = Math.max(128, Math.floor(Number(exportHeightInput.value) || 1600));
+  const modelCenter = box.getCenter(new THREE.Vector3());
+
+  let workerEnabled = true;
+  try {
+    await initSliceWorkerWithCache(sliceCache);
+  } catch (error) {
+    console.warn("slice worker 啟動失敗，改用主執行緒", error);
+    workerEnabled = false;
+  }
+
   fileName.textContent = `剖面匯出中：0/${total}`;
 
   let generated = 0;
@@ -374,8 +566,21 @@ async function exportSectionSlicesAsZip() {
       z = maxZ;
     }
 
-    const segments = computeSectionSegmentsAtZ(sliceCache, z);
-    const pngBlob = await renderSliceToPngBlob(segments, z);
+    let segments;
+    if (workerEnabled) {
+      segments = await computeSliceSegmentsWithWorker(z);
+    } else {
+      segments = new Float32Array(computeSectionSegmentsAtZ(sliceCache, z));
+    }
+
+    const pngBlob = await renderSliceToPngBlob(segments, z, {
+      platformWidth,
+      platformHeight,
+      outputWidth,
+      outputHeight,
+      centerX: modelCenter.x,
+      centerY: modelCenter.y,
+    });
     if (pngBlob) {
       const safeModelName = targetItem.fileName.replace(/\.[^.]+$/, "").replace(/[^a-zA-Z0-9_-]/g, "_");
       const fileNameInZip = `${safeModelName}_z_${z.toFixed(2).replace(".", "_")}.png`;
@@ -384,6 +589,10 @@ async function exportSectionSlicesAsZip() {
 
     generated += 1;
     fileName.textContent = `剖面匯出中：${generated}/${total}`;
+
+    if (generated % 20 === 0) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
   }
 
   const zipBlob = await zip.generateAsync({ type: "blob" });
