@@ -6,6 +6,7 @@ import { OBJLoader } from "three/examples/jsm/loaders/OBJLoader.js";
 import { LineSegments2 } from "three/examples/jsm/lines/LineSegments2.js";
 import { LineSegmentsGeometry } from "three/examples/jsm/lines/LineSegmentsGeometry.js";
 import { LineMaterial } from "three/examples/jsm/lines/LineMaterial.js";
+import JSZip from "jszip";
 
 const canvas = document.getElementById("viewerCanvas");
 const fileInput = document.getElementById("fileInput");
@@ -16,6 +17,7 @@ const modelInfo = document.getElementById("modelInfo");
 const renderSolidBtn = document.getElementById("renderSolid");
 const renderWireBtn = document.getElementById("renderWire");
 const detectBoundaryBtn = document.getElementById("detectBoundaryBtn");
+const exportSlicesBtn = document.getElementById("exportSlicesBtn");
 const sectionSlider = document.getElementById("sectionSlider");
 const sectionStep = document.getElementById("sectionStep");
 const sectionValue = document.getElementById("sectionValue");
@@ -118,6 +120,228 @@ const sectionFrameLine = new THREE.Line(sectionFrameGeometry, sectionFrameMateri
 sectionFrameLine.visible = false;
 sectionFrameLine.renderOrder = 3;
 scene.add(sectionFrameLine);
+
+function computeSectionSegmentsAtZ(object3D, z0) {
+  const segmentPoints = [];
+
+  object3D.traverse((child) => {
+    if (!child.isMesh || !child.geometry) {
+      return;
+    }
+
+    const geometry = child.geometry;
+    const position = geometry.getAttribute("position");
+    if (!position) {
+      return;
+    }
+
+    const index = geometry.getIndex();
+    child.updateWorldMatrix(true, false);
+
+    const readIndex = (idx) => (index ? index.getX(idx) : idx);
+    const triCount = index ? index.count / 3 : Math.floor(position.count / 3);
+
+    for (let tri = 0; tri < triCount; tri += 1) {
+      const ia = readIndex(tri * 3);
+      const ib = readIndex(tri * 3 + 1);
+      const ic = readIndex(tri * 3 + 2);
+
+      const a = new THREE.Vector3(position.getX(ia), position.getY(ia), position.getZ(ia)).applyMatrix4(
+        child.matrixWorld,
+      );
+      const b = new THREE.Vector3(position.getX(ib), position.getY(ib), position.getZ(ib)).applyMatrix4(
+        child.matrixWorld,
+      );
+      const c = new THREE.Vector3(position.getX(ic), position.getY(ic), position.getZ(ic)).applyMatrix4(
+        child.matrixWorld,
+      );
+
+      const hits = [];
+      const edges = [
+        [a, b],
+        [b, c],
+        [c, a],
+      ];
+
+      edges.forEach(([p1, p2]) => {
+        const d1 = p1.z - z0;
+        const d2 = p2.z - z0;
+
+        if ((d1 > 0 && d2 > 0) || (d1 < 0 && d2 < 0)) {
+          return;
+        }
+
+        if (Math.abs(d1 - d2) < 1e-8) {
+          return;
+        }
+
+        const t = d1 / (d1 - d2);
+        if (t < 0 || t > 1) {
+          return;
+        }
+
+        const point = new THREE.Vector3().lerpVectors(p1, p2, t);
+        hits.push(point);
+      });
+
+      if (hits.length >= 2) {
+        segmentPoints.push(hits[0], hits[1]);
+      }
+    }
+  });
+
+  return segmentPoints;
+}
+
+function renderSliceToPngBlob(segmentPoints, zValue) {
+  const canvas2d = document.createElement("canvas");
+  const size = 1200;
+  const padding = 50;
+  canvas2d.width = size;
+  canvas2d.height = size;
+  const ctx = canvas2d.getContext("2d");
+
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, size, size);
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  ctx.strokeStyle = "#ff0033";
+  ctx.lineWidth = 2;
+
+  if (segmentPoints.length >= 2) {
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minY = Infinity;
+    let maxY = -Infinity;
+
+    segmentPoints.forEach((point) => {
+      minX = Math.min(minX, point.x);
+      maxX = Math.max(maxX, point.x);
+      minY = Math.min(minY, point.y);
+      maxY = Math.max(maxY, point.y);
+    });
+
+    const width = Math.max(maxX - minX, 1e-6);
+    const height = Math.max(maxY - minY, 1e-6);
+    const scale = Math.min((size - padding * 2) / width, (size - padding * 2) / height);
+    const offsetX = (size - width * scale) / 2 - minX * scale;
+    const offsetY = (size - height * scale) / 2 - minY * scale;
+
+    for (let i = 0; i < segmentPoints.length; i += 2) {
+      const p1 = segmentPoints[i];
+      const p2 = segmentPoints[i + 1];
+      if (!p2) {
+        continue;
+      }
+
+      const x1 = p1.x * scale + offsetX;
+      const y1 = size - (p1.y * scale + offsetY);
+      const x2 = p2.x * scale + offsetX;
+      const y2 = size - (p2.y * scale + offsetY);
+
+      ctx.beginPath();
+      ctx.moveTo(x1, y1);
+      ctx.lineTo(x2, y2);
+      ctx.stroke();
+    }
+  }
+
+  ctx.fillStyle = "#111827";
+  ctx.font = "24px Segoe UI";
+  ctx.fillText(`Z = ${zValue.toFixed(2)}`, 24, 36);
+
+  return new Promise((resolve) => {
+    canvas2d.toBlob((blob) => {
+      resolve(blob);
+    }, "image/png");
+  });
+}
+
+async function saveZipBlob(blob, fileNameToSave) {
+  if (window.showSaveFilePicker) {
+    const handle = await window.showSaveFilePicker({
+      suggestedName: fileNameToSave,
+      types: [
+        {
+          description: "ZIP 檔案",
+          accept: {
+            "application/zip": [".zip"],
+          },
+        },
+      ],
+    });
+    const writable = await handle.createWritable();
+    await writable.write(blob);
+    await writable.close();
+    return;
+  }
+
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = fileNameToSave;
+  document.body.appendChild(anchor);
+  anchor.click();
+  document.body.removeChild(anchor);
+  URL.revokeObjectURL(url);
+}
+
+async function exportSectionSlicesAsZip() {
+  const targetItem = modelItems.find((item) => item.id === activeModelId) || modelItems[0];
+  if (!targetItem) {
+    fileName.textContent = "請先上傳並選取模型後再匯出剖面";
+    return;
+  }
+
+  const step = Math.max(0.01, Number(sectionStep.value) || 1);
+  const box = new THREE.Box3().setFromObject(targetItem.object3D);
+  const minZ = Math.max(0, box.min.z);
+  const maxZ = Math.max(minZ, box.max.z);
+
+  if (maxZ - minZ < 1e-6) {
+    fileName.textContent = "模型 Z 高度範圍不足，無法輸出剖面";
+    return;
+  }
+
+  const zip = new JSZip();
+  const total = Math.floor((maxZ - minZ) / step) + 1;
+
+  fileName.textContent = `剖面匯出中：0/${total}`;
+
+  let generated = 0;
+  for (let i = 0; i < total; i += 1) {
+    let z = minZ + i * step;
+    if (z > maxZ) {
+      z = maxZ;
+    }
+
+    const segments = computeSectionSegmentsAtZ(targetItem.object3D, z);
+    const pngBlob = await renderSliceToPngBlob(segments, z);
+    if (pngBlob) {
+      const safeModelName = targetItem.fileName.replace(/\.[^.]+$/, "").replace(/[^a-zA-Z0-9_-]/g, "_");
+      const fileNameInZip = `${safeModelName}_z_${z.toFixed(2).replace(".", "_")}.png`;
+      zip.file(fileNameInZip, pngBlob);
+    }
+
+    generated += 1;
+    fileName.textContent = `剖面匯出中：${generated}/${total}`;
+  }
+
+  const zipBlob = await zip.generateAsync({ type: "blob" });
+  const zipFileName = `${targetItem.fileName.replace(/\.[^.]+$/, "")}_sections.zip`;
+
+  try {
+    await saveZipBlob(zipBlob, zipFileName);
+    fileName.textContent = `剖面匯出完成：${zipFileName}`;
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      fileName.textContent = "已取消儲存剖面 ZIP";
+      return;
+    }
+    console.error(error);
+    fileName.textContent = "剖面匯出失敗";
+  }
+}
 
 function resizeRenderer() {
   const width = viewerWrap.clientWidth;
@@ -1118,6 +1342,10 @@ renderWireBtn.addEventListener("click", () => {
 
 detectBoundaryBtn.addEventListener("click", () => {
   detectBoundaryForActiveModel();
+});
+
+exportSlicesBtn.addEventListener("click", async () => {
+  await exportSectionSlicesAsZip();
 });
 
 boundarySensitivity.addEventListener("input", () => {
