@@ -121,8 +121,10 @@ sectionFrameLine.visible = false;
 sectionFrameLine.renderOrder = 3;
 scene.add(sectionFrameLine);
 
-function computeSectionSegmentsAtZ(object3D, z0) {
-  const segmentPoints = [];
+function buildSliceTriangleCache(object3D) {
+  const triangles = [];
+  const triMinZ = [];
+  const triMaxZ = [];
 
   object3D.traverse((child) => {
     if (!child.isMesh || !child.geometry) {
@@ -137,7 +139,6 @@ function computeSectionSegmentsAtZ(object3D, z0) {
 
     const index = geometry.getIndex();
     child.updateWorldMatrix(true, false);
-
     const readIndex = (idx) => (index ? index.getX(idx) : idx);
     const triCount = index ? index.count / 3 : Math.floor(position.count / 3);
 
@@ -156,39 +157,69 @@ function computeSectionSegmentsAtZ(object3D, z0) {
         child.matrixWorld,
       );
 
-      const hits = [];
-      const edges = [
-        [a, b],
-        [b, c],
-        [c, a],
-      ];
-
-      edges.forEach(([p1, p2]) => {
-        const d1 = p1.z - z0;
-        const d2 = p2.z - z0;
-
-        if ((d1 > 0 && d2 > 0) || (d1 < 0 && d2 < 0)) {
-          return;
-        }
-
-        if (Math.abs(d1 - d2) < 1e-8) {
-          return;
-        }
-
-        const t = d1 / (d1 - d2);
-        if (t < 0 || t > 1) {
-          return;
-        }
-
-        const point = new THREE.Vector3().lerpVectors(p1, p2, t);
-        hits.push(point);
-      });
-
-      if (hits.length >= 2) {
-        segmentPoints.push(hits[0], hits[1]);
-      }
+      triangles.push(a.x, a.y, a.z, b.x, b.y, b.z, c.x, c.y, c.z);
+      triMinZ.push(Math.min(a.z, b.z, c.z));
+      triMaxZ.push(Math.max(a.z, b.z, c.z));
     }
   });
+
+  return {
+    triangles,
+    triMinZ,
+    triMaxZ,
+    triCount: triMinZ.length,
+  };
+}
+
+function intersectEdgeAtZ(x1, y1, z1, x2, y2, z2, z0, outHits) {
+  const d1 = z1 - z0;
+  const d2 = z2 - z0;
+
+  if ((d1 > 0 && d2 > 0) || (d1 < 0 && d2 < 0)) {
+    return;
+  }
+
+  if (Math.abs(d1 - d2) < 1e-8) {
+    return;
+  }
+
+  const t = d1 / (d1 - d2);
+  if (t < 0 || t > 1) {
+    return;
+  }
+
+  outHits.push(x1 + (x2 - x1) * t, y1 + (y2 - y1) * t);
+}
+
+function computeSectionSegmentsAtZ(sliceCache, z0) {
+  const segmentPoints = [];
+  const { triangles, triMinZ, triMaxZ, triCount } = sliceCache;
+
+  for (let tri = 0; tri < triCount; tri += 1) {
+    if (z0 < triMinZ[tri] || z0 > triMaxZ[tri]) {
+      continue;
+    }
+
+    const base = tri * 9;
+    const ax = triangles[base];
+    const ay = triangles[base + 1];
+    const az = triangles[base + 2];
+    const bx = triangles[base + 3];
+    const by = triangles[base + 4];
+    const bz = triangles[base + 5];
+    const cx = triangles[base + 6];
+    const cy = triangles[base + 7];
+    const cz = triangles[base + 8];
+
+    const hits = [];
+    intersectEdgeAtZ(ax, ay, az, bx, by, bz, z0, hits);
+    intersectEdgeAtZ(bx, by, bz, cx, cy, cz, z0, hits);
+    intersectEdgeAtZ(cx, cy, cz, ax, ay, az, z0, hits);
+
+    if (hits.length >= 4) {
+      segmentPoints.push(hits[0], hits[1], hits[2], hits[3]);
+    }
+  }
 
   return segmentPoints;
 }
@@ -201,25 +232,27 @@ function renderSliceToPngBlob(segmentPoints, zValue) {
   canvas2d.height = size;
   const ctx = canvas2d.getContext("2d");
 
-  ctx.fillStyle = "#ffffff";
+  ctx.fillStyle = "#000000";
   ctx.fillRect(0, 0, size, size);
   ctx.lineCap = "round";
   ctx.lineJoin = "round";
-  ctx.strokeStyle = "#ff0033";
-  ctx.lineWidth = 2;
+  ctx.strokeStyle = "#ffffff";
+  ctx.lineWidth = 3;
 
-  if (segmentPoints.length >= 2) {
+  if (segmentPoints.length >= 4) {
     let minX = Infinity;
     let maxX = -Infinity;
     let minY = Infinity;
     let maxY = -Infinity;
 
-    segmentPoints.forEach((point) => {
-      minX = Math.min(minX, point.x);
-      maxX = Math.max(maxX, point.x);
-      minY = Math.min(minY, point.y);
-      maxY = Math.max(maxY, point.y);
-    });
+    for (let i = 0; i < segmentPoints.length; i += 2) {
+      const x = segmentPoints[i];
+      const y = segmentPoints[i + 1];
+      minX = Math.min(minX, x);
+      maxX = Math.max(maxX, x);
+      minY = Math.min(minY, y);
+      maxY = Math.max(maxY, y);
+    }
 
     const width = Math.max(maxX - minX, 1e-6);
     const height = Math.max(maxY - minY, 1e-6);
@@ -227,17 +260,11 @@ function renderSliceToPngBlob(segmentPoints, zValue) {
     const offsetX = (size - width * scale) / 2 - minX * scale;
     const offsetY = (size - height * scale) / 2 - minY * scale;
 
-    for (let i = 0; i < segmentPoints.length; i += 2) {
-      const p1 = segmentPoints[i];
-      const p2 = segmentPoints[i + 1];
-      if (!p2) {
-        continue;
-      }
-
-      const x1 = p1.x * scale + offsetX;
-      const y1 = size - (p1.y * scale + offsetY);
-      const x2 = p2.x * scale + offsetX;
-      const y2 = size - (p2.y * scale + offsetY);
+    for (let i = 0; i < segmentPoints.length; i += 4) {
+      const x1 = segmentPoints[i] * scale + offsetX;
+      const y1 = size - (segmentPoints[i + 1] * scale + offsetY);
+      const x2 = segmentPoints[i + 2] * scale + offsetX;
+      const y2 = size - (segmentPoints[i + 3] * scale + offsetY);
 
       ctx.beginPath();
       ctx.moveTo(x1, y1);
@@ -246,7 +273,7 @@ function renderSliceToPngBlob(segmentPoints, zValue) {
     }
   }
 
-  ctx.fillStyle = "#111827";
+  ctx.fillStyle = "#ffffff";
   ctx.font = "24px Segoe UI";
   ctx.fillText(`Z = ${zValue.toFixed(2)}`, 24, 36);
 
@@ -331,6 +358,12 @@ async function exportSectionSlicesAsZip() {
 
   const zip = new JSZip();
   const total = Math.floor((maxZ - minZ) / step) + 1;
+  const sliceCache = buildSliceTriangleCache(targetItem.object3D);
+
+  if (!sliceCache.triCount) {
+    fileName.textContent = "模型沒有可用三角形，無法輸出剖面";
+    return;
+  }
 
   fileName.textContent = `剖面匯出中：0/${total}`;
 
@@ -341,7 +374,7 @@ async function exportSectionSlicesAsZip() {
       z = maxZ;
     }
 
-    const segments = computeSectionSegmentsAtZ(targetItem.object3D, z);
+    const segments = computeSectionSegmentsAtZ(sliceCache, z);
     const pngBlob = await renderSliceToPngBlob(segments, z);
     if (pngBlob) {
       const safeModelName = targetItem.fileName.replace(/\.[^.]+$/, "").replace(/[^a-zA-Z0-9_-]/g, "_");
