@@ -911,17 +911,21 @@ function assignModelMetadata(object3D, id) {
 
 function setCameraPreset(viewKey) {
   const target = controls.target.clone();
-  let direction = new THREE.Vector3(1, -1, 1);
+  const presets = {
+    iso: { direction: new THREE.Vector3(1, -1, 1), up: new THREE.Vector3(0, 0, 1) },
+    front: { direction: new THREE.Vector3(0, -1, 0), up: new THREE.Vector3(0, 0, 1) },
+    back: { direction: new THREE.Vector3(0, 1, 0), up: new THREE.Vector3(0, 0, 1) },
+    left: { direction: new THREE.Vector3(-1, 0, 0), up: new THREE.Vector3(0, 0, 1) },
+    right: { direction: new THREE.Vector3(1, 0, 0), up: new THREE.Vector3(0, 0, 1) },
+    top: { direction: new THREE.Vector3(0, 0, 1), up: new THREE.Vector3(0, 1, 0) },
+    bottom: { direction: new THREE.Vector3(0, 0, -1), up: new THREE.Vector3(0, 1, 0) },
+  };
 
-  if (viewKey === "front") direction = new THREE.Vector3(0, -1, 0);
-  if (viewKey === "back") direction = new THREE.Vector3(0, 1, 0);
-  if (viewKey === "left") direction = new THREE.Vector3(-1, 0, 0);
-  if (viewKey === "right") direction = new THREE.Vector3(1, 0, 0);
-  if (viewKey === "top") direction = new THREE.Vector3(0, 0, 1);
-  if (viewKey === "bottom") direction = new THREE.Vector3(0, 0, -1);
+  const preset = presets[viewKey] || presets.iso;
 
   const distance = camera.position.distanceTo(target);
-  camera.position.copy(target.clone().add(direction.normalize().multiplyScalar(distance)));
+  camera.up.copy(preset.up);
+  camera.position.copy(target.clone().add(preset.direction.clone().normalize().multiplyScalar(distance)));
   camera.lookAt(target);
   camera.updateProjectionMatrix();
   controls.update();
