@@ -518,10 +518,17 @@ function renderSliceToPngBlob(segmentPoints, zValue, renderSettings) {
       }
 
       const dataUrl = canvas2d.toDataURL("image/png");
-      fetch(dataUrl)
-        .then((resp) => resp.blob())
-        .then((fallbackBlob) => resolve(fallbackBlob))
-        .catch(() => resolve(null));
+      try {
+        const base64 = dataUrl.split(",")[1] || "";
+        const binary = atob(base64);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i += 1) {
+          bytes[i] = binary.charCodeAt(i);
+        }
+        resolve(new Blob([bytes], { type: "image/png" }));
+      } catch {
+        resolve(null);
+      }
     }, "image/png");
   });
 }
@@ -548,10 +555,14 @@ async function requestZipSaveHandle(fileNameToSave) {
 
 async function saveZipBlob(blob, fileNameToSave, saveHandle = null) {
   if (saveHandle) {
-    const writable = await saveHandle.createWritable();
-    await writable.write(blob);
-    await writable.close();
-    return;
+    try {
+      const writable = await saveHandle.createWritable();
+      await writable.write(blob);
+      await writable.close();
+      return;
+    } catch (error) {
+      console.warn("透過檔案控制代碼儲存失敗，改用下載", error);
+    }
   }
 
   const url = URL.createObjectURL(blob);
@@ -690,7 +701,14 @@ async function exportSectionSlicesAsZip() {
       return;
     }
     console.error(error);
-    fileName.textContent = "剖面匯出失敗";
+
+    try {
+      await saveZipBlob(zipBlob, zipFileName, null);
+      fileName.textContent = `剖面匯出完成（下載備援）：${zipFileName}（${addedPngCount} 張）`;
+    } catch (fallbackError) {
+      console.error(fallbackError);
+      fileName.textContent = "剖面匯出失敗";
+    }
   }
 }
 
