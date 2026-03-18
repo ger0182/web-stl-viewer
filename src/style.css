@@ -64,8 +64,9 @@ body {
 .viewer-wrap {
   position: relative;
   width: 100%;
-  height: min(75vh, 820px);
-  min-height: 480px;
+  height: calc(100vh - 150px);
+  min-height: 560px;
+  max-height: 1000px;
   border-radius: 12px;
   overflow: hidden;
   background: #e5e7eb;

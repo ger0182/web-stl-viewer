@@ -66,10 +66,46 @@ const dirLight = new THREE.DirectionalLight(0xffffff, 1.8);
 dirLight.position.set(80, 100, 120);
 scene.add(dirLight);
 
-const grid = new THREE.GridHelper(300, 20, 0x9ca3af, 0xd1d5db);
-grid.rotation.x = Math.PI / 2;
-grid.position.z = 0;
-scene.add(grid);
+let platformGrid = null;
+
+function buildPlatformGrid(width, height, xDivisions = 16, yDivisions = 12) {
+  if (platformGrid) {
+    scene.remove(platformGrid);
+    platformGrid.geometry?.dispose();
+    platformGrid.material?.dispose();
+    platformGrid = null;
+  }
+
+  const halfW = width / 2;
+  const halfH = height / 2;
+  const points = [];
+
+  for (let i = 0; i <= xDivisions; i += 1) {
+    const x = -halfW + (width * i) / xDivisions;
+    points.push(x, -halfH, 0, x, halfH, 0);
+  }
+
+  for (let j = 0; j <= yDivisions; j += 1) {
+    const y = -halfH + (height * j) / yDivisions;
+    points.push(-halfW, y, 0, halfW, y, 0);
+  }
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(points, 3));
+  const material = new THREE.LineBasicMaterial({ color: 0x9ca3af, transparent: true, opacity: 0.85 });
+
+  platformGrid = new THREE.LineSegments(geometry, material);
+  platformGrid.position.set(0, 0, 0);
+  scene.add(platformGrid);
+}
+
+function updatePlatformGridFromInputs() {
+  const width = Math.max(1, Number(platformWidthInput.value) || 192);
+  const height = Math.max(1, Number(platformHeightInput.value) || 120);
+  buildPlatformGrid(width, height);
+}
+
+updatePlatformGridFromInputs();
 
 const axis = new THREE.AxesHelper(80);
 scene.add(axis);
@@ -422,11 +458,14 @@ function drawSliceOnCanvas(targetCanvas, segmentPoints, zValue, renderSettings) 
 
   const left = centerX - platformWidth / 2;
   const bottom = centerY - platformHeight / 2;
-  const scaleX = sizeW / platformWidth;
-  const scaleY = sizeH / platformHeight;
+  const uniformScale = Math.min(sizeW / platformWidth, sizeH / platformHeight);
+  const contentW = platformWidth * uniformScale;
+  const contentH = platformHeight * uniformScale;
+  const marginX = (sizeW - contentW) / 2;
+  const marginY = (sizeH - contentH) / 2;
 
-  const toPixelX = (x) => (x - left) * scaleX;
-  const toPixelY = (y) => sizeH - (y - bottom) * scaleY;
+  const toPixelX = (x) => marginX + (x - left) * uniformScale;
+  const toPixelY = (y) => sizeH - (marginY + (y - bottom) * uniformScale);
 
   const pixelSegments = [];
   for (let i = 0; i < segmentPoints.length; i += 4) {
@@ -473,7 +512,16 @@ function renderSliceToPngBlob(segmentPoints, zValue, renderSettings) {
 
   return new Promise((resolve) => {
     canvas2d.toBlob((blob) => {
-      resolve(blob);
+      if (blob) {
+        resolve(blob);
+        return;
+      }
+
+      const dataUrl = canvas2d.toDataURL("image/png");
+      fetch(dataUrl)
+        .then((resp) => resp.blob())
+        .then((fallbackBlob) => resolve(fallbackBlob))
+        .catch(() => resolve(null));
     }, "image/png");
   });
 }
@@ -584,6 +632,7 @@ async function exportSectionSlicesAsZip() {
   fileName.textContent = `剖面匯出中：0/${total}`;
 
   let generated = 0;
+  let addedPngCount = 0;
   for (let i = 0; i < total; i += 1) {
     let z = minZ + i * step;
     if (z > maxZ) {
@@ -609,6 +658,7 @@ async function exportSectionSlicesAsZip() {
       const safeModelName = targetItem.fileName.replace(/\.[^.]+$/, "").replace(/[^a-zA-Z0-9_-]/g, "_");
       const fileNameInZip = `${safeModelName}_z_${z.toFixed(2).replace(".", "_")}.png`;
       zip.file(fileNameInZip, pngBlob);
+      addedPngCount += 1;
     }
 
     generated += 1;
@@ -619,11 +669,21 @@ async function exportSectionSlicesAsZip() {
     }
   }
 
+  if (!addedPngCount) {
+    fileName.textContent = "剖面匯出失敗：沒有可輸出的剖面影像";
+    return;
+  }
+
   const zipBlob = await zip.generateAsync({ type: "blob" });
+
+  if (!zipBlob || zipBlob.size === 0) {
+    fileName.textContent = "剖面匯出失敗：ZIP 內容為空";
+    return;
+  }
 
   try {
     await saveZipBlob(zipBlob, zipFileName, saveHandle);
-    fileName.textContent = `剖面匯出完成：${zipFileName}`;
+    fileName.textContent = `剖面匯出完成：${zipFileName}（${addedPngCount} 張）`;
   } catch (error) {
     if (error?.name === "AbortError") {
       fileName.textContent = "已取消儲存剖面 ZIP";
@@ -1780,6 +1840,24 @@ sectionStep.addEventListener("change", () => {
   sectionStep.value = `${validStep}`;
   sectionSlider.step = `${validStep}`;
   previewZSlider.step = `${validStep}`;
+});
+
+platformWidthInput.addEventListener("change", () => {
+  const value = Math.max(1, Number(platformWidthInput.value) || 192);
+  platformWidthInput.value = `${value}`;
+  updatePlatformGridFromInputs();
+  if (isSlicePreviewMode) {
+    updateSlicePreviewAtZ(Number(previewZSlider.value || 0));
+  }
+});
+
+platformHeightInput.addEventListener("change", () => {
+  const value = Math.max(1, Number(platformHeightInput.value) || 120);
+  platformHeightInput.value = `${value}`;
+  updatePlatformGridFromInputs();
+  if (isSlicePreviewMode) {
+    updateSlicePreviewAtZ(Number(previewZSlider.value || 0));
+  }
 });
 
 sectionSlider.addEventListener("input", () => {
