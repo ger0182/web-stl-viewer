@@ -120,8 +120,9 @@ let rightDragPointerId = null;
 let isSlicePreviewMode = false;
 let previewRequestToken = 0;
 let previewSliceCache = null;
-let previewSliceTargetItem = null;
 let previewSliceBounds = null;
+let previewSliceModelSetKey = "";
+const modelSliceCacheMap = new Map();
 
 const raycaster = new THREE.Raycaster();
 const pointer = new THREE.Vector2();
@@ -303,6 +304,98 @@ function buildSliceTriangleCache(object3D) {
     triMaxZ: new Float32Array(triMaxZ),
     triCount: triMinZ.length,
   };
+}
+
+function getCurrentModelSetKey() {
+  return modelItems.map((item) => item.id).join("|");
+}
+
+function getOrBuildModelSliceCache(modelItem) {
+  let cache = modelSliceCacheMap.get(modelItem.id);
+  if (!cache) {
+    cache = buildSliceTriangleCache(modelItem.object3D);
+    modelSliceCacheMap.set(modelItem.id, cache);
+  }
+  return cache;
+}
+
+function mergeSliceCaches(caches) {
+  const validCaches = caches.filter((cache) => cache && cache.triCount > 0);
+  if (!validCaches.length) {
+    return {
+      triangles: new Float32Array(0),
+      triMinZ: new Float32Array(0),
+      triMaxZ: new Float32Array(0),
+      triCount: 0,
+    };
+  }
+
+  let totalTriCount = 0;
+  validCaches.forEach((cache) => {
+    totalTriCount += cache.triCount;
+  });
+
+  const triangles = new Float32Array(totalTriCount * 9);
+  const triMinZ = new Float32Array(totalTriCount);
+  const triMaxZ = new Float32Array(totalTriCount);
+
+  let triOffset = 0;
+  validCaches.forEach((cache) => {
+    triangles.set(cache.triangles, triOffset * 9);
+    triMinZ.set(cache.triMinZ, triOffset);
+    triMaxZ.set(cache.triMaxZ, triOffset);
+    triOffset += cache.triCount;
+  });
+
+  return {
+    triangles,
+    triMinZ,
+    triMaxZ,
+    triCount: totalTriCount,
+  };
+}
+
+function buildSceneSliceCache() {
+  const caches = modelItems.map((item) => getOrBuildModelSliceCache(item));
+  return mergeSliceCaches(caches);
+}
+
+function dedupeSegmentPoints(segmentPoints, precision = 1000) {
+  if (!segmentPoints.length) {
+    return new Float32Array(0);
+  }
+
+  const counts = new Map();
+  const keyOfPoint = (x, y) => `${Math.round(x * precision)}_${Math.round(y * precision)}`;
+
+  for (let i = 0; i < segmentPoints.length; i += 4) {
+    const x1 = segmentPoints[i];
+    const y1 = segmentPoints[i + 1];
+    const x2 = segmentPoints[i + 2];
+    const y2 = segmentPoints[i + 3];
+    const p1 = keyOfPoint(x1, y1);
+    const p2 = keyOfPoint(x2, y2);
+    const key = p1 < p2 ? `${p1}|${p2}` : `${p2}|${p1}`;
+    counts.set(key, (counts.get(key) || 0) + 1);
+  }
+
+  const deduped = [];
+  for (let i = 0; i < segmentPoints.length; i += 4) {
+    const x1 = segmentPoints[i];
+    const y1 = segmentPoints[i + 1];
+    const x2 = segmentPoints[i + 2];
+    const y2 = segmentPoints[i + 3];
+    const p1 = keyOfPoint(x1, y1);
+    const p2 = keyOfPoint(x2, y2);
+    const key = p1 < p2 ? `${p1}|${p2}` : `${p2}|${p1}`;
+    const count = counts.get(key) || 0;
+    if (count % 2 === 1) {
+      deduped.push(x1, y1, x2, y2);
+      counts.set(key, 0);
+    }
+  }
+
+  return new Float32Array(deduped);
 }
 
 function intersectEdgeAtZ(x1, y1, z1, x2, y2, z2, z0, outHits) {
@@ -596,14 +689,17 @@ async function saveZipBlob(blob, fileNameToSave, saveHandle = null) {
 }
 
 async function exportSectionSlicesAsZip() {
-  const targetItem = previewSliceTargetItem || modelItems.find((item) => item.id === activeModelId) || modelItems[0];
-  if (!targetItem) {
-    fileName.textContent = "請先上傳並選取模型後再匯出剖面";
+  if (!modelItems.length) {
+    fileName.textContent = "請先上傳模型後再匯出剖面";
     return;
   }
 
   const step = Math.max(0.01, Number(sectionStep.value) || 1);
-  const box = previewSliceBounds || new THREE.Box3().setFromObject(targetItem.object3D);
+  const box = previewSliceBounds || getSceneBounds();
+  if (!box) {
+    fileName.textContent = "找不到模型範圍，無法匯出剖面";
+    return;
+  }
   const minZ = Math.max(0, box.min.z);
   const maxZ = Math.max(minZ, box.max.z);
 
@@ -612,7 +708,7 @@ async function exportSectionSlicesAsZip() {
     return;
   }
 
-  const zipFileName = `${targetItem.fileName.replace(/\.[^.]+$/, "").replace(/[\\/:*?"<>|]/g, "_")}_sections.zip`;
+  const zipFileName = "platform_sections.zip";
 
   let saveHandle = null;
   if (window.showSaveFilePicker) {
@@ -631,15 +727,16 @@ async function exportSectionSlicesAsZip() {
 
   const zip = new JSZip();
   const total = Math.floor((maxZ - minZ) / step) + 1;
+  const currentModelSetKey = getCurrentModelSetKey();
   const sliceCache =
-    previewSliceCache && previewSliceTargetItem?.id === targetItem.id
+    previewSliceCache && previewSliceModelSetKey === currentModelSetKey
       ? {
           triangles: previewSliceCache.triangles.slice(),
           triMinZ: previewSliceCache.triMinZ.slice(),
           triMaxZ: previewSliceCache.triMaxZ.slice(),
           triCount: previewSliceCache.triCount,
         }
-      : buildSliceTriangleCache(targetItem.object3D);
+      : buildSceneSliceCache();
 
   if (!sliceCache.triCount) {
     fileName.textContent = "模型沒有可用三角形，無法輸出剖面";
@@ -666,7 +763,7 @@ async function exportSectionSlicesAsZip() {
     fileName.textContent = `剖面匯出中：${generated}/${total}`;
 
     try {
-      const segments = new Float32Array(computeSectionSegmentsAtZ(sliceCache, z));
+      const segments = dedupeSegmentPoints(computeSectionSegmentsAtZ(sliceCache, z));
       const pngBlob = await renderSliceToPngBlob(segments, z, {
         platformWidth,
         platformHeight,
@@ -677,8 +774,7 @@ async function exportSectionSlicesAsZip() {
       });
 
       if (pngBlob) {
-        const safeModelName = targetItem.fileName.replace(/\.[^.]+$/, "").replace(/[^a-zA-Z0-9_-]/g, "_");
-        const fileNameInZip = `${safeModelName}_z_${z.toFixed(2).replace(".", "_")}.png`;
+        const fileNameInZip = `slice_z_${z.toFixed(2).replace(".", "_")}.png`;
         zip.file(fileNameInZip, pngBlob);
         addedPngCount += 1;
       }
@@ -1170,10 +1266,14 @@ async function updateSlicePreviewAtZ(zValue) {
       segments = await computeSliceSegmentsWithWorker(zValue);
     } catch (error) {
       console.warn("預覽 worker 計算失敗，改主執行緒", error);
-      segments = new Float32Array(computeSectionSegmentsAtZ(previewSliceCache, zValue));
+      segments = dedupeSegmentPoints(computeSectionSegmentsAtZ(previewSliceCache, zValue));
     }
   } else {
-    segments = new Float32Array(computeSectionSegmentsAtZ(previewSliceCache, zValue));
+    segments = dedupeSegmentPoints(computeSectionSegmentsAtZ(previewSliceCache, zValue));
+  }
+
+  if (sliceWorkerReady) {
+    segments = dedupeSegmentPoints(segments);
   }
 
   if (token !== previewRequestToken) {
@@ -1186,13 +1286,17 @@ async function updateSlicePreviewAtZ(zValue) {
 }
 
 async function enterSlicePreviewMode() {
-  const targetItem = modelItems.find((item) => item.id === activeModelId) || modelItems[0];
-  if (!targetItem) {
+  if (!modelItems.length) {
     fileName.textContent = "請先上傳模型再切換切層預覽";
     return;
   }
 
-  const bounds = new THREE.Box3().setFromObject(targetItem.object3D);
+  const bounds = getSceneBounds();
+  if (!bounds) {
+    fileName.textContent = "找不到模型範圍，無法切層預覽";
+    return;
+  }
+
   const minZ = Math.max(0, bounds.min.z);
   const maxZ = Math.max(minZ, bounds.max.z);
   if (maxZ - minZ < 1e-6) {
@@ -1200,13 +1304,14 @@ async function enterSlicePreviewMode() {
     return;
   }
 
-  const cache = buildSliceTriangleCache(targetItem.object3D);
+  const currentModelSetKey = getCurrentModelSetKey();
+  const cache = buildSceneSliceCache();
   if (!cache.triCount) {
     fileName.textContent = "模型沒有可用三角形，無法切層預覽";
     return;
   }
 
-  previewSliceTargetItem = targetItem;
+  previewSliceModelSetKey = currentModelSetKey;
   previewSliceBounds = bounds;
   previewSliceCache = cache;
 
@@ -1736,6 +1841,10 @@ async function handleSelectedFile(selectedFile) {
     };
 
     modelItems.push(modelItem);
+    modelSliceCacheMap.delete(id);
+    previewSliceCache = null;
+    previewSliceBounds = null;
+    previewSliceModelSetKey = "";
     scene.add(model);
     clearBoundaryLines();
     updateSectionSliderRange();
