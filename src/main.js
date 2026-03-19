@@ -479,14 +479,34 @@ function drawSliceOnCanvas(targetCanvas, segmentPoints, zValue, renderSettings) 
 
   const loops = buildClosedLoopsFromSegments(pixelSegments, 1.8);
   ctx.fillStyle = "#ffffff";
+  if (loops.length) {
+    ctx.beginPath();
+    loops.forEach((loop) => {
+      if (!loop.length) {
+        return;
+      }
+
+      ctx.moveTo(loop[0].x, loop[0].y);
+      for (let i = 1; i < loop.length; i += 1) {
+        ctx.lineTo(loop[i].x, loop[i].y);
+      }
+      ctx.closePath();
+    });
+
+    ctx.fill("evenodd");
+  }
+
   loops.forEach((loop) => {
+    if (!loop.length) {
+      return;
+    }
     ctx.beginPath();
     ctx.moveTo(loop[0].x, loop[0].y);
     for (let i = 1; i < loop.length; i += 1) {
       ctx.lineTo(loop[i].x, loop[i].y);
     }
     ctx.closePath();
-    ctx.fill();
+    ctx.stroke();
   });
 
   for (let i = 0; i < pixelSegments.length; i += 4) {
