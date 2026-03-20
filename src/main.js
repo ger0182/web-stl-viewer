@@ -451,87 +451,56 @@ function computeSectionSegmentsAtZ(sliceCache, z0) {
   return segmentPoints;
 }
 
-function buildClosedLoopsFromSegments(segmentPoints, tolerancePixels = 1.5) {
-  const keyMap = new Map();
-  const vertices = [];
-  const adjacency = [];
-  const edges = [];
-
-  const keyOf = (x, y) => `${Math.round(x / tolerancePixels)}_${Math.round(y / tolerancePixels)}`;
-
-  const getVertexId = (x, y) => {
-    const key = keyOf(x, y);
-    const existing = keyMap.get(key);
-    if (existing !== undefined) {
-      return existing;
-    }
-
-    const id = vertices.length;
-    keyMap.set(key, id);
-    vertices.push({ x, y });
-    adjacency.push([]);
-    return id;
-  };
-
-  for (let i = 0; i < segmentPoints.length; i += 4) {
-    const x1 = segmentPoints[i];
-    const y1 = segmentPoints[i + 1];
-    const x2 = segmentPoints[i + 2];
-    const y2 = segmentPoints[i + 3];
-    const a = getVertexId(x1, y1);
-    const b = getVertexId(x2, y2);
-    if (a === b) {
-      continue;
-    }
-    const edgeId = edges.length;
-    edges.push({ a, b, used: false });
-    adjacency[a].push(edgeId);
-    adjacency[b].push(edgeId);
+function fillSegmentsByScanline(ctx, pixelSegments, width, height) {
+  if (!pixelSegments.length) {
+    return;
   }
 
-  const loops = [];
+  const epsilon = 1e-6;
 
-  for (let i = 0; i < edges.length; i += 1) {
-    if (edges[i].used) {
+  for (let y = 0; y < height; y += 1) {
+    const scanY = y + 0.5;
+    const intersections = [];
+
+    for (let i = 0; i < pixelSegments.length; i += 4) {
+      const x1 = pixelSegments[i];
+      const y1 = pixelSegments[i + 1];
+      const x2 = pixelSegments[i + 2];
+      const y2 = pixelSegments[i + 3];
+
+      const dy = y2 - y1;
+      if (Math.abs(dy) < epsilon) {
+        continue;
+      }
+
+      const minY = Math.min(y1, y2);
+      const maxY = Math.max(y1, y2);
+      if (scanY < minY || scanY >= maxY) {
+        continue;
+      }
+
+      const t = (scanY - y1) / dy;
+      intersections.push(x1 + (x2 - x1) * t);
+    }
+
+    if (intersections.length < 2) {
       continue;
     }
 
-    edges[i].used = true;
-    let start = edges[i].a;
-    let current = edges[i].b;
-    const loop = [vertices[start], vertices[current]];
-    let guard = 0;
+    intersections.sort((a, b) => a - b);
 
-    while (guard < edges.length * 2) {
-      guard += 1;
-      if (current === start) {
-        break;
+    ctx.beginPath();
+    for (let i = 0; i + 1 < intersections.length; i += 2) {
+      const xStart = Math.max(0, Math.min(width, intersections[i]));
+      const xEnd = Math.max(0, Math.min(width, intersections[i + 1]));
+      const segmentWidth = xEnd - xStart;
+
+      if (segmentWidth > 0.25) {
+        ctx.rect(xStart, y, segmentWidth, 1);
       }
-
-      let nextEdgeId = -1;
-      for (const candidateEdgeId of adjacency[current]) {
-        if (!edges[candidateEdgeId].used) {
-          nextEdgeId = candidateEdgeId;
-          break;
-        }
-      }
-
-      if (nextEdgeId === -1) {
-        break;
-      }
-
-      edges[nextEdgeId].used = true;
-      const edge = edges[nextEdgeId];
-      current = edge.a === current ? edge.b : edge.a;
-      loop.push(vertices[current]);
     }
-
-    if (loop.length >= 4 && current === start) {
-      loops.push(loop);
-    }
+    ctx.fill();
   }
-
-  return loops;
 }
 
 function drawSliceOnCanvas(targetCanvas, segmentPoints, zValue, renderSettings) {
@@ -570,37 +539,8 @@ function drawSliceOnCanvas(targetCanvas, segmentPoints, zValue, renderSettings) 
     );
   }
 
-  const loops = buildClosedLoopsFromSegments(pixelSegments, 1.8);
   ctx.fillStyle = "#ffffff";
-  if (loops.length) {
-    ctx.beginPath();
-    loops.forEach((loop) => {
-      if (!loop.length) {
-        return;
-      }
-
-      ctx.moveTo(loop[0].x, loop[0].y);
-      for (let i = 1; i < loop.length; i += 1) {
-        ctx.lineTo(loop[i].x, loop[i].y);
-      }
-      ctx.closePath();
-    });
-
-    ctx.fill("evenodd");
-  }
-
-  loops.forEach((loop) => {
-    if (!loop.length) {
-      return;
-    }
-    ctx.beginPath();
-    ctx.moveTo(loop[0].x, loop[0].y);
-    for (let i = 1; i < loop.length; i += 1) {
-      ctx.lineTo(loop[i].x, loop[i].y);
-    }
-    ctx.closePath();
-    ctx.stroke();
-  });
+  fillSegmentsByScanline(ctx, pixelSegments, sizeW, sizeH);
 
   for (let i = 0; i < pixelSegments.length; i += 4) {
     const x1 = pixelSegments[i];
