@@ -198,6 +198,11 @@
           <canvas id="slicePreviewCanvas" class="slice-preview-canvas"></canvas>
           <aside class="slice-preview-side">
             <div class="panel-title">切層預覽</div>
+            <label for="sliceEngine">模式</label>
+            <select id="sliceEngine">
+              <option value="cpu">目前版本</option>
+              <option value="gpu">GPU 影像</option>
+            </select>
             <div id="previewZValue" class="section-value">Z: 0</div>
             <input
               id="previewZSlider"

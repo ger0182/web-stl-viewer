@@ -20,6 +20,7 @@ const detectBoundaryBtn = document.getElementById("detectBoundaryBtn");
 const enterSlicePreviewBtn = document.getElementById("enterSlicePreviewBtn");
 const slicePreviewOverlay = document.getElementById("slicePreviewOverlay");
 const slicePreviewCanvas = document.getElementById("slicePreviewCanvas");
+const sliceEngine = document.getElementById("sliceEngine");
 const previewZSlider = document.getElementById("previewZSlider");
 const previewZValue = document.getElementById("previewZValue");
 const previewPerfText = document.getElementById("previewPerfText");
@@ -123,6 +124,37 @@ let previewSliceCache = null;
 let previewSliceBounds = null;
 let previewSliceModelSetKey = "";
 const modelSliceCacheMap = new Map();
+const gpuSliceCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 10000);
+const gpuSliceMaterial = new THREE.ShaderMaterial({
+  uniforms: {
+    zMin: { value: 0 },
+    zMax: { value: 0 },
+  },
+  vertexShader: `
+    varying float vWorldZ;
+    void main() {
+      vec4 worldPos = modelMatrix * vec4(position, 1.0);
+      vWorldZ = worldPos.z;
+      gl_Position = projectionMatrix * viewMatrix * worldPos;
+    }
+  `,
+  fragmentShader: `
+    varying float vWorldZ;
+    uniform float zMin;
+    uniform float zMax;
+    void main() {
+      if (vWorldZ < zMin || vWorldZ > zMax) {
+        discard;
+      }
+      gl_FragColor = vec4(1.0, 1.0, 1.0, 1.0);
+    }
+  `,
+  side: THREE.DoubleSide,
+  depthTest: true,
+  depthWrite: true,
+});
+let gpuSliceRenderTarget = null;
+let gpuSlicePixels = null;
 
 const raycaster = new THREE.Raycaster();
 const pointer = new THREE.Vector2();
@@ -503,7 +535,27 @@ function fillSegmentsByScanline(ctx, pixelSegments, width, height) {
   }
 }
 
-function drawSliceOnCanvas(targetCanvas, segmentPoints, zValue, renderSettings) {
+function ensureGpuSliceRenderResources(width, height) {
+  const w = Math.max(1, Math.floor(width));
+  const h = Math.max(1, Math.floor(height));
+
+  if (!gpuSliceRenderTarget || gpuSliceRenderTarget.width !== w || gpuSliceRenderTarget.height !== h) {
+    gpuSliceRenderTarget?.dispose();
+    gpuSliceRenderTarget = new THREE.WebGLRenderTarget(w, h, {
+      depthBuffer: true,
+      stencilBuffer: false,
+    });
+    gpuSlicePixels = new Uint8Array(w * h * 4);
+  }
+}
+
+function drawSliceLabel(ctx, zValue, sizeH) {
+  ctx.fillStyle = "#ffffff";
+  ctx.font = `${Math.max(18, Math.round(sizeH * 0.02))}px Segoe UI`;
+  ctx.fillText(`Z = ${zValue.toFixed(2)}`, 20, Math.max(30, Math.round(sizeH * 0.03)));
+}
+
+function drawSliceOnCanvasCPU(targetCanvas, segmentPoints, zValue, renderSettings) {
   const { outputWidth, outputHeight, platformWidth, platformHeight, centerX, centerY } = renderSettings;
   const sizeW = outputWidth;
   const sizeH = outputHeight;
@@ -554,14 +606,93 @@ function drawSliceOnCanvas(targetCanvas, segmentPoints, zValue, renderSettings) 
     ctx.stroke();
   }
 
-  ctx.fillStyle = "#ffffff";
-  ctx.font = `${Math.max(18, Math.round(sizeH * 0.02))}px Segoe UI`;
-  ctx.fillText(`Z = ${zValue.toFixed(2)}`, 20, Math.max(30, Math.round(sizeH * 0.03)));
+  drawSliceLabel(ctx, zValue, sizeH);
 }
 
-function renderSliceToPngBlob(segmentPoints, zValue, renderSettings) {
+function drawSliceOnCanvasGPU(targetCanvas, zValue, renderSettings) {
+  const { outputWidth, outputHeight, platformWidth, platformHeight, centerX, centerY } = renderSettings;
+  const sizeW = Math.max(1, Math.floor(outputWidth));
+  const sizeH = Math.max(1, Math.floor(outputHeight));
+
+  targetCanvas.width = sizeW;
+  targetCanvas.height = sizeH;
+  ensureGpuSliceRenderResources(sizeW, sizeH);
+
+  const previousTarget = renderer.getRenderTarget();
+  const previousClearColor = renderer.getClearColor(new THREE.Color()).clone();
+  const previousClearAlpha = renderer.getClearAlpha();
+  const previousOverride = scene.overrideMaterial;
+
+  const helperObjects = [axis, sectionLineGroup, boundaryLineGroup, sectionFrameLine, platformGrid].filter(Boolean);
+  const helperVisibility = helperObjects.map((obj) => obj.visible);
+
+  helperObjects.forEach((obj) => {
+    obj.visible = false;
+  });
+
+  const halfThickness = Math.max(0.02, (Math.max(0.01, Number(sectionStep.value) || 1) * 0.5) / 2);
+  gpuSliceMaterial.uniforms.zMin.value = zValue - halfThickness;
+  gpuSliceMaterial.uniforms.zMax.value = zValue + halfThickness;
+
+  const halfW = platformWidth / 2;
+  const halfH = platformHeight / 2;
+  gpuSliceCamera.left = -halfW;
+  gpuSliceCamera.right = halfW;
+  gpuSliceCamera.top = halfH;
+  gpuSliceCamera.bottom = -halfH;
+  gpuSliceCamera.near = 0.1;
+  gpuSliceCamera.far = 20000;
+  gpuSliceCamera.position.set(centerX, centerY, 10000);
+  gpuSliceCamera.up.set(0, 1, 0);
+  gpuSliceCamera.lookAt(centerX, centerY, 0);
+  gpuSliceCamera.updateProjectionMatrix();
+
+  renderer.setRenderTarget(gpuSliceRenderTarget);
+  renderer.setClearColor(0x000000, 1);
+  renderer.clear(true, true, true);
+  scene.overrideMaterial = gpuSliceMaterial;
+  renderer.render(scene, gpuSliceCamera);
+  renderer.readRenderTargetPixels(gpuSliceRenderTarget, 0, 0, sizeW, sizeH, gpuSlicePixels);
+
+  scene.overrideMaterial = previousOverride;
+  renderer.setRenderTarget(previousTarget);
+  renderer.setClearColor(previousClearColor, previousClearAlpha);
+
+  helperObjects.forEach((obj, idx) => {
+    obj.visible = helperVisibility[idx];
+  });
+
+  const ctx = targetCanvas.getContext("2d");
+  const imageData = ctx.createImageData(sizeW, sizeH);
+
+  for (let y = 0; y < sizeH; y += 1) {
+    const srcY = sizeH - 1 - y;
+    for (let x = 0; x < sizeW; x += 1) {
+      const srcIdx = (srcY * sizeW + x) * 4;
+      const dstIdx = (y * sizeW + x) * 4;
+      imageData.data[dstIdx] = gpuSlicePixels[srcIdx];
+      imageData.data[dstIdx + 1] = gpuSlicePixels[srcIdx + 1];
+      imageData.data[dstIdx + 2] = gpuSlicePixels[srcIdx + 2];
+      imageData.data[dstIdx + 3] = 255;
+    }
+  }
+
+  ctx.putImageData(imageData, 0, 0);
+  drawSliceLabel(ctx, zValue, sizeH);
+}
+
+async function drawSliceOnCanvas(targetCanvas, segmentPoints, zValue, renderSettings) {
+  if ((renderSettings.sliceEngine || "cpu") === "gpu") {
+    drawSliceOnCanvasGPU(targetCanvas, zValue, renderSettings);
+    return;
+  }
+
+  drawSliceOnCanvasCPU(targetCanvas, segmentPoints, zValue, renderSettings);
+}
+
+async function renderSliceToPngBlob(segmentPoints, zValue, renderSettings) {
   const canvas2d = document.createElement("canvas");
-  drawSliceOnCanvas(canvas2d, segmentPoints, zValue, renderSettings);
+  await drawSliceOnCanvas(canvas2d, segmentPoints, zValue, renderSettings);
 
   return new Promise((resolve) => {
     canvas2d.toBlob((blob) => {
@@ -667,20 +798,24 @@ async function exportSectionSlicesAsZip() {
 
   const zip = new JSZip();
   const total = Math.floor((maxZ - minZ) / step) + 1;
-  const currentModelSetKey = getCurrentModelSetKey();
-  const sliceCache =
-    previewSliceCache && previewSliceModelSetKey === currentModelSetKey
-      ? {
-          triangles: previewSliceCache.triangles.slice(),
-          triMinZ: previewSliceCache.triMinZ.slice(),
-          triMaxZ: previewSliceCache.triMaxZ.slice(),
-          triCount: previewSliceCache.triCount,
-        }
-      : buildSceneSliceCache();
+  const selectedSliceEngine = sliceEngine?.value || "cpu";
+  let sliceCache = null;
+  if (selectedSliceEngine === "cpu") {
+    const currentModelSetKey = getCurrentModelSetKey();
+    sliceCache =
+      previewSliceCache && previewSliceModelSetKey === currentModelSetKey
+        ? {
+            triangles: previewSliceCache.triangles.slice(),
+            triMinZ: previewSliceCache.triMinZ.slice(),
+            triMaxZ: previewSliceCache.triMaxZ.slice(),
+            triCount: previewSliceCache.triCount,
+          }
+        : buildSceneSliceCache();
 
-  if (!sliceCache.triCount) {
-    fileName.textContent = "模型沒有可用三角形，無法輸出剖面";
-    return;
+    if (!sliceCache.triCount) {
+      fileName.textContent = "模型沒有可用三角形，無法輸出剖面";
+      return;
+    }
   }
 
   const platformWidth = Math.max(1, Number(platformWidthInput.value) || 192);
@@ -703,7 +838,8 @@ async function exportSectionSlicesAsZip() {
     fileName.textContent = `剖面匯出中：${generated}/${total}`;
 
     try {
-      const segments = dedupeSegmentPoints(computeSectionSegmentsAtZ(sliceCache, z));
+      const segments =
+        selectedSliceEngine === "cpu" ? dedupeSegmentPoints(computeSectionSegmentsAtZ(sliceCache, z)) : null;
       const pngBlob = await renderSliceToPngBlob(segments, z, {
         platformWidth,
         platformHeight,
@@ -711,6 +847,7 @@ async function exportSectionSlicesAsZip() {
         outputHeight,
         centerX: modelCenter.x,
         centerY: modelCenter.y,
+        sliceEngine: selectedSliceEngine,
       });
 
       if (pngBlob) {
@@ -1176,6 +1313,7 @@ function getCurrentSliceRenderSettings() {
     outputHeight,
     centerX: center.x,
     centerY: center.y,
+    sliceEngine: sliceEngine?.value || "cpu",
   };
 }
 
@@ -1192,7 +1330,7 @@ function getPreviewRenderSettings() {
 }
 
 async function updateSlicePreviewAtZ(zValue) {
-  if (!isSlicePreviewMode || !previewSliceCache) {
+  if (!isSlicePreviewMode) {
     return;
   }
 
@@ -1200,29 +1338,40 @@ async function updateSlicePreviewAtZ(zValue) {
   const startTime = performance.now();
   previewZValue.textContent = `Z: ${Number(zValue).toFixed(2)}`;
 
-  let segments;
-  if (sliceWorkerReady) {
-    try {
-      segments = await computeSliceSegmentsWithWorker(zValue);
-    } catch (error) {
-      console.warn("預覽 worker 計算失敗，改主執行緒", error);
+  const selectedSliceEngine = sliceEngine?.value || "cpu";
+  let segments = null;
+
+  if (selectedSliceEngine === "cpu") {
+    if (!previewSliceCache) {
+      return;
+    }
+
+    if (sliceWorkerReady) {
+      try {
+        segments = await computeSliceSegmentsWithWorker(zValue);
+      } catch (error) {
+        console.warn("預覽 worker 計算失敗，改主執行緒", error);
+        segments = dedupeSegmentPoints(computeSectionSegmentsAtZ(previewSliceCache, zValue));
+      }
+    } else {
       segments = dedupeSegmentPoints(computeSectionSegmentsAtZ(previewSliceCache, zValue));
     }
-  } else {
-    segments = dedupeSegmentPoints(computeSectionSegmentsAtZ(previewSliceCache, zValue));
-  }
 
-  if (sliceWorkerReady) {
-    segments = dedupeSegmentPoints(segments);
+    if (sliceWorkerReady) {
+      segments = dedupeSegmentPoints(segments);
+    }
   }
 
   if (token !== previewRequestToken) {
     return;
   }
 
-  drawSliceOnCanvas(slicePreviewCanvas, segments, zValue, getPreviewRenderSettings());
+  await drawSliceOnCanvas(slicePreviewCanvas, segments, zValue, {
+    ...getPreviewRenderSettings(),
+    sliceEngine: selectedSliceEngine,
+  });
   const elapsed = performance.now() - startTime;
-  previewPerfText.textContent = `計算：${elapsed.toFixed(1)} ms`;
+  previewPerfText.textContent = `計算：${elapsed.toFixed(1)} ms（${selectedSliceEngine.toUpperCase()}）`;
 }
 
 async function enterSlicePreviewMode() {
@@ -1244,26 +1393,35 @@ async function enterSlicePreviewMode() {
     return;
   }
 
-  const currentModelSetKey = getCurrentModelSetKey();
-  const cache = buildSceneSliceCache();
-  if (!cache.triCount) {
-    fileName.textContent = "模型沒有可用三角形，無法切層預覽";
-    return;
+  const selectedSliceEngine = sliceEngine?.value || "cpu";
+  let cache = null;
+
+  if (selectedSliceEngine === "cpu") {
+    const currentModelSetKey = getCurrentModelSetKey();
+    cache = buildSceneSliceCache();
+    if (!cache.triCount) {
+      fileName.textContent = "模型沒有可用三角形，無法切層預覽";
+      return;
+    }
+    previewSliceModelSetKey = currentModelSetKey;
+  } else {
+    previewSliceModelSetKey = "";
   }
 
-  previewSliceModelSetKey = currentModelSetKey;
   previewSliceBounds = bounds;
   previewSliceCache = cache;
 
-  try {
-    await initSliceWorkerWithCache({
-      triangles: cache.triangles.slice(),
-      triMinZ: cache.triMinZ.slice(),
-      triMaxZ: cache.triMaxZ.slice(),
-      triCount: cache.triCount,
-    });
-  } catch (error) {
-    console.warn("預覽模式 worker 初始化失敗，改用主執行緒", error);
+  if (selectedSliceEngine === "cpu" && cache) {
+    try {
+      await initSliceWorkerWithCache({
+        triangles: cache.triangles.slice(),
+        triMinZ: cache.triMinZ.slice(),
+        triMaxZ: cache.triMaxZ.slice(),
+        triCount: cache.triCount,
+      });
+    } catch (error) {
+      console.warn("預覽模式 worker 初始化失敗，改用主執行緒", error);
+    }
   }
 
   previewZSlider.min = `${minZ}`;
@@ -1918,6 +2076,15 @@ sectionStep.addEventListener("change", () => {
   sectionStep.value = `${validStep}`;
   sectionSlider.step = `${validStep}`;
   previewZSlider.step = `${validStep}`;
+  if (isSlicePreviewMode) {
+    updateSlicePreviewAtZ(Number(previewZSlider.value || 0));
+  }
+});
+
+sliceEngine.addEventListener("change", () => {
+  if (isSlicePreviewMode) {
+    enterSlicePreviewMode();
+  }
 });
 
 platformWidthInput.addEventListener("change", () => {
