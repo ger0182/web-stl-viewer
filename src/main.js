@@ -127,8 +127,8 @@ const modelSliceCacheMap = new Map();
 const gpuSliceCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 10000);
 const gpuSliceMaterial = new THREE.ShaderMaterial({
   uniforms: {
-    zMin: { value: 0 },
-    zMax: { value: 0 },
+    zPlane: { value: 0 },
+    zBand: { value: 0.05 },
   },
   vertexShader: `
     varying float vWorldZ;
@@ -140,10 +140,10 @@ const gpuSliceMaterial = new THREE.ShaderMaterial({
   `,
   fragmentShader: `
     varying float vWorldZ;
-    uniform float zMin;
-    uniform float zMax;
+    uniform float zPlane;
+    uniform float zBand;
     void main() {
-      if (vWorldZ < zMin || vWorldZ > zMax) {
+      if (abs(vWorldZ - zPlane) > zBand) {
         discard;
       }
       gl_FragColor = vec4(1.0, 1.0, 1.0, 1.0);
@@ -630,9 +630,10 @@ function drawSliceOnCanvasGPU(targetCanvas, zValue, renderSettings) {
     obj.visible = false;
   });
 
-  const halfThickness = Math.max(0.02, (Math.max(0.01, Number(sectionStep.value) || 1) * 0.5) / 2);
-  gpuSliceMaterial.uniforms.zMin.value = zValue - halfThickness;
-  gpuSliceMaterial.uniforms.zMax.value = zValue + halfThickness;
+  const worldPerPixel = Math.max(platformWidth / sizeW, platformHeight / sizeH);
+  const zBand = Math.max(0.005, worldPerPixel * 0.6);
+  gpuSliceMaterial.uniforms.zPlane.value = zValue;
+  gpuSliceMaterial.uniforms.zBand.value = zBand;
 
   const halfW = platformWidth / 2;
   const halfH = platformHeight / 2;
