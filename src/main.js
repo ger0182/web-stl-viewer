@@ -664,16 +664,55 @@ function drawSliceOnCanvasGPU(targetCanvas, zValue, renderSettings) {
 
   const ctx = targetCanvas.getContext("2d");
   const imageData = ctx.createImageData(sizeW, sizeH);
+  const edgeMask = new Uint8Array(sizeW * sizeH);
+  const threshold = 24;
 
   for (let y = 0; y < sizeH; y += 1) {
     const srcY = sizeH - 1 - y;
     for (let x = 0; x < sizeW; x += 1) {
       const srcIdx = (srcY * sizeW + x) * 4;
-      const dstIdx = (y * sizeW + x) * 4;
-      imageData.data[dstIdx] = gpuSlicePixels[srcIdx];
-      imageData.data[dstIdx + 1] = gpuSlicePixels[srcIdx + 1];
-      imageData.data[dstIdx + 2] = gpuSlicePixels[srcIdx + 2];
-      imageData.data[dstIdx + 3] = 255;
+      const luminance = gpuSlicePixels[srcIdx] + gpuSlicePixels[srcIdx + 1] + gpuSlicePixels[srcIdx + 2];
+      edgeMask[y * sizeW + x] = luminance > threshold ? 1 : 0;
+    }
+  }
+
+  for (let y = 0; y < sizeH; y += 1) {
+    const rowOffset = y * sizeW;
+    const intersections = [];
+    let prev = 0;
+
+    for (let x = 0; x < sizeW; x += 1) {
+      imageData.data[(rowOffset + x) * 4 + 3] = 255;
+    }
+
+    for (let x = 0; x < sizeW; x += 1) {
+      const current = edgeMask[rowOffset + x];
+      if (current && !prev) {
+        intersections.push(x);
+      }
+      prev = current;
+    }
+
+    for (let i = 0; i + 1 < intersections.length; i += 2) {
+      const xStart = intersections[i];
+      const xEnd = intersections[i + 1];
+      for (let x = xStart; x <= xEnd; x += 1) {
+        const dstIdx = (rowOffset + x) * 4;
+        imageData.data[dstIdx] = 255;
+        imageData.data[dstIdx + 1] = 255;
+        imageData.data[dstIdx + 2] = 255;
+        imageData.data[dstIdx + 3] = 255;
+      }
+    }
+
+    for (let x = 0; x < sizeW; x += 1) {
+      if (edgeMask[rowOffset + x]) {
+        const dstIdx = (rowOffset + x) * 4;
+        imageData.data[dstIdx] = 255;
+        imageData.data[dstIdx + 1] = 255;
+        imageData.data[dstIdx + 2] = 255;
+        imageData.data[dstIdx + 3] = 255;
+      }
     }
   }
 
