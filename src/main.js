@@ -124,6 +124,7 @@ let previewSliceCache = null;
 let previewSliceBounds = null;
 let previewSliceModelSetKey = "";
 const modelSliceCacheMap = new Map();
+let currentSectionSegments = new Float32Array(0);
 const gpuSliceCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 10000);
 const gpuSliceMaterial = new THREE.ShaderMaterial({
   uniforms: {
@@ -205,6 +206,30 @@ const sectionFrameLine = new THREE.Line(sectionFrameGeometry, sectionFrameMateri
 sectionFrameLine.visible = false;
 sectionFrameLine.renderOrder = 3;
 scene.add(sectionFrameLine);
+
+const sectionFillCanvas = document.createElement("canvas");
+const sectionFillTexture = new THREE.CanvasTexture(sectionFillCanvas);
+sectionFillTexture.colorSpace = THREE.SRGBColorSpace;
+sectionFillTexture.generateMipmaps = false;
+sectionFillTexture.minFilter = THREE.LinearFilter;
+sectionFillTexture.magFilter = THREE.LinearFilter;
+
+const sectionFillPlaneMaterial = new THREE.MeshBasicMaterial({
+  map: sectionFillTexture,
+  transparent: true,
+  alphaTest: 0.05,
+  side: THREE.DoubleSide,
+  depthTest: true,
+  depthWrite: true,
+  polygonOffset: true,
+  polygonOffsetFactor: -1,
+  polygonOffsetUnits: -1,
+  toneMapped: false,
+});
+const sectionFillPlane = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), sectionFillPlaneMaterial);
+sectionFillPlane.visible = false;
+sectionFillPlane.renderOrder = 2;
+scene.add(sectionFillPlane);
 
 let sliceWorker = null;
 let sliceWorkerReady = false;
@@ -535,6 +560,76 @@ function fillSegmentsByScanline(ctx, pixelSegments, width, height) {
   }
 }
 
+function getSectionFillRenderSettings() {
+  const bounds = getSceneBounds();
+  if (!bounds) {
+    return null;
+  }
+
+  const platformWidth = Math.max(1, Number(platformWidthInput.value) || 192);
+  const platformHeight = Math.max(1, Number(platformHeightInput.value) || 120);
+  const center = bounds.getCenter(new THREE.Vector3());
+  const maxTextureSize = 1024;
+  const scale = Math.min(maxTextureSize / platformWidth, maxTextureSize / platformHeight);
+
+  return {
+    platformWidth,
+    platformHeight,
+    outputWidth: Math.max(256, Math.round(platformWidth * scale)),
+    outputHeight: Math.max(256, Math.round(platformHeight * scale)),
+    centerX: center.x,
+    centerY: center.y,
+  };
+}
+
+function drawSectionFillOnCanvas(targetCanvas, segmentPoints, renderSettings, fillColor) {
+  const { outputWidth, outputHeight, platformWidth, platformHeight, centerX, centerY } = renderSettings;
+  const sizeW = Math.max(1, outputWidth);
+  const sizeH = Math.max(1, outputHeight);
+  targetCanvas.width = sizeW;
+  targetCanvas.height = sizeH;
+
+  const ctx = targetCanvas.getContext("2d");
+  ctx.clearRect(0, 0, sizeW, sizeH);
+
+  const left = centerX - platformWidth / 2;
+  const bottom = centerY - platformHeight / 2;
+  const uniformScale = Math.min(sizeW / platformWidth, sizeH / platformHeight);
+  const contentW = platformWidth * uniformScale;
+  const contentH = platformHeight * uniformScale;
+  const marginX = (sizeW - contentW) / 2;
+  const marginY = (sizeH - contentH) / 2;
+
+  const toPixelX = (x) => marginX + (x - left) * uniformScale;
+  const toPixelY = (y) => sizeH - (marginY + (y - bottom) * uniformScale);
+
+  const pixelSegments = [];
+  for (let i = 0; i < segmentPoints.length; i += 4) {
+    pixelSegments.push(
+      toPixelX(segmentPoints[i]),
+      toPixelY(segmentPoints[i + 1]),
+      toPixelX(segmentPoints[i + 2]),
+      toPixelY(segmentPoints[i + 3]),
+    );
+  }
+
+  ctx.fillStyle = fillColor;
+  fillSegmentsByScanline(ctx, pixelSegments, sizeW, sizeH);
+}
+
+function computeCurrentSectionSegments() {
+  if (!modelItems.length || sectionHeight <= 0) {
+    return new Float32Array(0);
+  }
+
+  const sliceCache = buildSceneSliceCache();
+  if (!sliceCache.triCount) {
+    return new Float32Array(0);
+  }
+
+  return dedupeSegmentPoints(computeSectionSegmentsAtZ(sliceCache, sectionHeight));
+}
+
 function ensureGpuSliceRenderResources(width, height) {
   const w = Math.max(1, Math.floor(width));
   const h = Math.max(1, Math.floor(height));
@@ -623,7 +718,7 @@ function drawSliceOnCanvasGPU(targetCanvas, zValue, renderSettings) {
   const previousClearAlpha = renderer.getClearAlpha();
   const previousOverride = scene.overrideMaterial;
 
-  const helperObjects = [axis, sectionLineGroup, boundaryLineGroup, sectionFrameLine, platformGrid].filter(Boolean);
+  const helperObjects = [axis, sectionLineGroup, boundaryLineGroup, sectionFrameLine, sectionFillPlane, platformGrid].filter(Boolean);
   const helperVisibility = helperObjects.map((obj) => obj.visible);
 
   helperObjects.forEach((obj) => {
@@ -1116,10 +1211,10 @@ function clearSectionLines() {
   }
 }
 
-function updateSectionIntersectionLines() {
+function updateSectionIntersectionLines(segmentPoints = currentSectionSegments) {
   clearSectionLines();
 
-  if (sectionHeight <= 0) {
+  if (sectionHeight <= 0 || !segmentPoints.length) {
     sectionLineGroup.visible = false;
     return;
   }
@@ -1127,80 +1222,16 @@ function updateSectionIntersectionLines() {
   const segmentPositions = [];
   const z0 = sectionHeight;
 
-  modelItems.forEach((item) => {
-    item.object3D.traverse((child) => {
-      if (!child.isMesh || !child.geometry) {
-        return;
-      }
-
-      const geometry = child.geometry;
-      const position = geometry.getAttribute("position");
-      if (!position) {
-        return;
-      }
-
-      const index = geometry.getIndex();
-      child.updateWorldMatrix(true, false);
-
-      const readIndex = (idx) => (index ? index.getX(idx) : idx);
-      const triCount = index ? index.count / 3 : position.count / 3;
-
-      for (let tri = 0; tri < triCount; tri += 1) {
-        const ia = readIndex(tri * 3);
-        const ib = readIndex(tri * 3 + 1);
-        const ic = readIndex(tri * 3 + 2);
-
-        const a = new THREE.Vector3(position.getX(ia), position.getY(ia), position.getZ(ia)).applyMatrix4(
-          child.matrixWorld,
-        );
-        const b = new THREE.Vector3(position.getX(ib), position.getY(ib), position.getZ(ib)).applyMatrix4(
-          child.matrixWorld,
-        );
-        const c = new THREE.Vector3(position.getX(ic), position.getY(ic), position.getZ(ic)).applyMatrix4(
-          child.matrixWorld,
-        );
-
-        const hits = [];
-        const edges = [
-          [a, b],
-          [b, c],
-          [c, a],
-        ];
-
-        edges.forEach(([p1, p2]) => {
-          const d1 = p1.z - z0;
-          const d2 = p2.z - z0;
-
-          if ((d1 > 0 && d2 > 0) || (d1 < 0 && d2 < 0)) {
-            return;
-          }
-
-          if (Math.abs(d1 - d2) < 1e-8) {
-            return;
-          }
-
-          const t = d1 / (d1 - d2);
-          if (t < 0 || t > 1) {
-            return;
-          }
-
-          const point = new THREE.Vector3().lerpVectors(p1, p2, t);
-          hits.push(point);
-        });
-
-        if (hits.length >= 2) {
-          segmentPositions.push(
-            hits[0].x,
-            hits[0].y,
-            hits[0].z + 0.001,
-            hits[1].x,
-            hits[1].y,
-            hits[1].z + 0.001,
-          );
-        }
-      }
-    });
-  });
+  for (let i = 0; i < segmentPoints.length; i += 4) {
+    segmentPositions.push(
+      segmentPoints[i],
+      segmentPoints[i + 1],
+      z0 + 0.001,
+      segmentPoints[i + 2],
+      segmentPoints[i + 3],
+      z0 + 0.001,
+    );
+  }
 
   if (!segmentPositions.length) {
     sectionLineGroup.visible = false;
@@ -1305,8 +1336,9 @@ function updateSectionPlane(zValue) {
   sectionPlane.constant = -sectionHeight;
   setSectionClippingEnabled(enabled);
   sectionValue.textContent = `Z: ${sectionHeight.toFixed(2)}`;
-  updateSectionFillMesh();
-  updateSectionIntersectionLines();
+  currentSectionSegments = enabled ? computeCurrentSectionSegments() : new Float32Array(0);
+  updateSectionFillMesh(currentSectionSegments);
+  updateSectionIntersectionLines(currentSectionSegments);
 }
 
 function updateSectionSliderRange() {
@@ -1320,21 +1352,28 @@ function updateSectionSliderRange() {
   updateSectionPlane(nextZ);
 }
 
-function updateSectionFillMesh() {
+function updateSectionFillMesh(segmentPoints = currentSectionSegments) {
   const bounds = getSceneBounds();
-  if (!bounds || !sectionFillToggle.checked || sectionHeight <= 0) {
+  if (!bounds || !sectionFillToggle.checked || sectionHeight <= 0 || !segmentPoints.length) {
     sectionFrameLine.visible = false;
+    sectionFillPlane.visible = false;
     return;
   }
 
-  const size = bounds.getSize(new THREE.Vector3());
-  const center = bounds.getCenter(new THREE.Vector3());
-  const planeSize = Math.max(size.x, size.y, 10) * 1.2;
+  const renderSettings = getSectionFillRenderSettings();
+  if (!renderSettings) {
+    sectionFrameLine.visible = false;
+    sectionFillPlane.visible = false;
+    return;
+  }
 
-  sectionFrameLine.visible = true;
-  sectionFrameLine.scale.set(planeSize, planeSize, 1);
-  sectionFrameLine.position.set(center.x, center.y, sectionHeight + 0.001);
-  sectionFrameMaterial.color.set(sectionFillColor.value);
+  drawSectionFillOnCanvas(sectionFillCanvas, segmentPoints, renderSettings, sectionFillColor.value);
+  sectionFillTexture.needsUpdate = true;
+
+  sectionFrameLine.visible = false;
+  sectionFillPlane.visible = true;
+  sectionFillPlane.scale.set(renderSettings.platformWidth, renderSettings.platformHeight, 1);
+  sectionFillPlane.position.set(renderSettings.centerX, renderSettings.centerY, sectionHeight + 0.002);
 }
 
 function getCurrentSliceRenderSettings() {
@@ -2131,6 +2170,7 @@ platformWidthInput.addEventListener("change", () => {
   const value = Math.max(1, Number(platformWidthInput.value) || 192);
   platformWidthInput.value = `${value}`;
   updatePlatformGridFromInputs();
+  updateSectionFillMesh();
   if (isSlicePreviewMode) {
     updateSlicePreviewAtZ(Number(previewZSlider.value || 0));
   }
@@ -2140,6 +2180,7 @@ platformHeightInput.addEventListener("change", () => {
   const value = Math.max(1, Number(platformHeightInput.value) || 120);
   platformHeightInput.value = `${value}`;
   updatePlatformGridFromInputs();
+  updateSectionFillMesh();
   if (isSlicePreviewMode) {
     updateSlicePreviewAtZ(Number(previewZSlider.value || 0));
   }
@@ -2158,7 +2199,6 @@ sectionFillToggle.addEventListener("change", () => {
 });
 
 sectionFillColor.addEventListener("input", () => {
-  sectionFrameMaterial.color.set(sectionFillColor.value);
   updateSectionFillMesh();
 });
 
